@@ -1,0 +1,73 @@
+services:
+  peer-alpha:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./sync-data-alpha:/app/sync:delegated
+      - p2p-sync-db-alpha:/app/data
+      - ./config:/app/config:ro
+    ports:
+      - "8080:8080"
+      - "8081:8081/udp"
+    environment:
+      - P2P_SYNC_FOLDER=/app/sync
+      - P2P_CONFIG_PATH=/app/config/config.yaml
+      - PEER_ID=alpha
+      - PEERS=peer-beta:8080,peer-gamma:8080
+    networks:
+      - p2p-network
+    restart: unless-stopped
+
+  peer-beta:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./sync-data-beta:/app/sync:delegated
+      - p2p-sync-db-beta:/app/data
+      - ./config:/app/config:ro
+    ports:
+      - "8082:8080"
+      - "8083:8081/udp"
+    environment:
+      - P2P_SYNC_FOLDER=/app/sync
+      - P2P_CONFIG_PATH=/app/config/config.yaml
+      - PEER_ID=beta
+      - PEERS=peer-alpha:8080,peer-gamma:8080
+    networks:
+      - p2p-network
+    restart: unless-stopped
+
+  peer-gamma:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./sync-data-gamma:/app/sync:delegated
+      - p2p-sync-db-gamma:/app/data
+      - ./config:/app/config:ro
+    ports:
+      - "8084:8080"
+      - "8085:8081/udp"
+    environment:
+      - P2P_SYNC_FOLDER=/app/sync
+      - P2P_CONFIG_PATH=/app/config/config.yaml
+      - PEER_ID=gamma
+      - PEERS=peer-alpha:8080,peer-beta:8080
+    networks:
+      - p2p-network
+    restart: unless-stopped
+
+volumes:
+  p2p-sync-db-alpha:
+  p2p-sync-db-beta:
+  p2p-sync-db-gamma:
+
+networks:
+  p2p-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
