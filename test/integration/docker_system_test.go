@@ -69,7 +69,7 @@ func TestDockerComposeSystem(t *testing.T) {
 }
 
 func copyDockerFiles(t *testing.T, destDir string) {
-	srcDir := "/home/jonirap/p2p-folder-sync/p2p-folder-sync/docker"
+	srcDir := "/home/jonirap/p2p-folder-sync/p2p-folder-sync"
 	projectDir := "/home/jonirap/p2p-folder-sync/p2p-folder-sync"
 
 	// Copy docker files
@@ -459,8 +459,10 @@ func testConflictResolution(t *testing.T, projectName string) {
 // Helper functions
 
 func createFileInContainer(t *testing.T, projectName, container, filePath, content string) {
-	cmd := exec.Command("docker", "exec", fmt.Sprintf("%s-%s-1", projectName, container),
-		"sh", "-c", fmt.Sprintf("echo '%s' > %s", content, filePath))
+	cmd := exec.Command("docker", "exec", "-i", fmt.Sprintf("%s-%s-1", projectName, container),
+		"sh", "-c", fmt.Sprintf("cat > %s", filePath))
+
+	cmd.Stdin = strings.NewReader(content)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {

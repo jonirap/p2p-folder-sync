@@ -36,6 +36,10 @@ func (omm *LoadBalancingMessenger) RequestStateSync(peerID string) error {
 	return omm.innerMessenger.RequestStateSync(peerID)
 }
 
+func (omm *LoadBalancingMessenger) ConnectToPeer(peerID string, address string, port int) error {
+	return omm.innerMessenger.ConnectToPeer(peerID, address, port)
+}
+
 // TestLoadBalancingNewPeerSync tests load balancing when a new peer joins multiple existing peers
 // This test verifies:
 // - Load distribution across multiple source peers
@@ -374,16 +378,14 @@ func TestLoadBalancingEfficiency(t *testing.T) {
 	peer2Count := 0
 	peer3Count := 0
 
-	for _, files := range assignments {
-		for _, peer := range files {
-			switch peer {
-			case "peer1":
-				peer1Count++
-			case "peer2":
-				peer2Count++
-			case "peer3":
-				peer3Count++
-			}
+	for peer, files := range assignments {
+		switch peer {
+		case "peer1":
+			peer1Count = len(files)
+		case "peer2":
+			peer2Count = len(files)
+		case "peer3":
+			peer3Count = len(files)
 		}
 	}
 
@@ -781,14 +783,7 @@ func TestPeerCapacityHandling(t *testing.T) {
 	assignments := reconciler.AssignFilesWithCapacity(peerCapabilities, currentLoad, filesToSync)
 
 	// Verify busy-peer doesn't get overloaded
-	busyPeerAssignments := 0
-	for _, files := range assignments {
-		for _, peer := range files {
-			if peer == "busy-peer" {
-				busyPeerAssignments++
-			}
-		}
-	}
+	busyPeerAssignments := len(assignments["busy-peer"])
 
 	if busyPeerAssignments > 0 {
 		t.Error("FAILURE: Busy peer received assignments despite being at capacity")

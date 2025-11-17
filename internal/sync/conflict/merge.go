@@ -45,50 +45,85 @@ func ThreeWayMerge(op1, op2 *SyncOperation) (*SyncOperation, error) {
 
 // mergeLines merges two sets of lines with conflict markers
 func mergeLines(lines1, lines2 []string) []string {
-	// Simple merge: combine unique lines, mark conflicts
-	seen := make(map[string]bool)
 	var merged []string
 
-	// Add lines from both, marking conflicts
-	maxLen := len(lines1)
-	if len(lines2) > maxLen {
-		maxLen = len(lines2)
+	// Find common prefix
+	commonPrefix := findCommonPrefix(lines1, lines2)
+
+	// Add common prefix
+	merged = append(merged, commonPrefix...)
+
+	// Find remaining parts
+	remaining1 := lines1[len(commonPrefix):]
+	remaining2 := lines2[len(commonPrefix):]
+
+	// If one is empty, add the other
+	if len(remaining1) == 0 && len(remaining2) > 0 {
+		merged = append(merged, remaining2...)
+		return merged
+	}
+	if len(remaining2) == 0 && len(remaining1) > 0 {
+		merged = append(merged, remaining1...)
+		return merged
 	}
 
-	for i := 0; i < maxLen; i++ {
-		line1 := ""
-		line2 := ""
-
-		if i < len(lines1) {
-			line1 = lines1[i]
-		}
-		if i < len(lines2) {
-			line2 = lines2[i]
-		}
-
-		if line1 == line2 {
-			// Same line, add once
-			if !seen[line1] {
-				merged = append(merged, line1)
-				seen[line1] = true
-			}
+	// If both have remaining content, check for simple additions
+	if len(remaining1) > 0 && len(remaining2) > 0 {
+		// Check if one is just additions to the other
+		if isAddition(remaining1, remaining2) {
+			// remaining2 is addition to remaining1
+			merged = append(merged, remaining1...)
+			merged = append(merged, remaining2[len(remaining1):]...)
+		} else if isAddition(remaining2, remaining1) {
+			// remaining1 is addition to remaining2
+			merged = append(merged, remaining2...)
+			merged = append(merged, remaining1[len(remaining2):]...)
 		} else {
-			// Different lines - add conflict marker
-			if line1 != "" && !seen[line1] {
-				merged = append(merged, "<<<<<<< branch1")
-				merged = append(merged, line1)
-				seen[line1] = true
-			}
-			if line2 != "" && !seen[line2] {
-				merged = append(merged, "=======")
-				merged = append(merged, line2)
-				merged = append(merged, ">>>>>>> branch2")
-				seen[line2] = true
-			}
+			// Complex conflict - add conflict markers
+			merged = append(merged, "<<<<<<< branch1")
+			merged = append(merged, remaining1...)
+			merged = append(merged, "=======")
+			merged = append(merged, remaining2...)
+			merged = append(merged, ">>>>>>> branch2")
 		}
 	}
 
 	return merged
+}
+
+// findCommonPrefix finds the common prefix of two line arrays
+func findCommonPrefix(lines1, lines2 []string) []string {
+	minLen := len(lines1)
+	if len(lines2) < minLen {
+		minLen = len(lines2)
+	}
+
+	var common []string
+	for i := 0; i < minLen; i++ {
+		if lines1[i] == lines2[i] {
+			common = append(common, lines1[i])
+		} else {
+			break
+		}
+	}
+
+	return common
+}
+
+// isAddition checks if lines1 is an addition to lines2 (lines2 is prefix of lines1)
+func isAddition(lines1, lines2 []string) bool {
+	if len(lines1) < len(lines2) {
+		return false
+	}
+
+	// Check if lines2 is prefix of lines1
+	for i, line := range lines2 {
+		if i >= len(lines1) || lines1[i] != line {
+			return false
+		}
+	}
+
+	return true
 }
 
 func maxInt64(a, b int64) int64 {

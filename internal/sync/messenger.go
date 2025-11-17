@@ -153,3 +153,9 @@ func (m *InMemoryMessenger) BroadcastOperation(op *SyncOperation) error {
 
 	return nil
 }
+
+// ConnectToPeer is a no-op for in-memory messenger (connections are implicit)
+func (m *InMemoryMessenger) ConnectToPeer(peerID string, address string, port int) error {
+	// In-memory connections are always available
+	return nil
+}

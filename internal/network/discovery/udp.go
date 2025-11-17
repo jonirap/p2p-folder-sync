@@ -154,6 +154,9 @@ func (u *UDPDiscovery) handleDiscoveryResponse(msg *messages.Message, addr *net.
 
 // broadcast periodically broadcasts discovery messages
 func (u *UDPDiscovery) broadcast() {
+	// Send initial discovery message immediately
+	u.sendDiscovery()
+
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 

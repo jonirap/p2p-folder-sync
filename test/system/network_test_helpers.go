@@ -14,6 +14,7 @@ import (
 	"github.com/p2p-folder-sync/p2p-sync/internal/database"
 	"github.com/p2p-folder-sync/p2p-sync/internal/network"
 	"github.com/p2p-folder-sync/p2p-sync/internal/network/connection"
+	"github.com/p2p-folder-sync/p2p-sync/internal/network/discovery"
 	"github.com/p2p-folder-sync/p2p-sync/internal/network/messages"
 	"github.com/p2p-folder-sync/p2p-sync/internal/network/transport"
 	syncpkg "github.com/p2p-folder-sync/p2p-sync/internal/sync"
@@ -26,9 +27,11 @@ type NetworkPeerSetup struct {
 	Config      *config.Config
 	Database    *database.DB
 	Transport   transport.Transport
-	Messenger   *network.NetworkMessenger
+	Messenger   syncpkg.Messenger
 	SyncEngine  *syncpkg.Engine
 	ConnManager *connection.ConnectionManager
+	Registry    *discovery.Registry
+	Discovery   *discovery.UDPDiscovery
 	Cleanup     func()
 }
 
@@ -91,6 +94,33 @@ func (nth *NetworkTestHelper) SetupPeer(t *testing.T, peerName string, enableEnc
 		return nil, fmt.Errorf("failed to create messenger: %w", err)
 	}
 
+	// Initialize discovery registry
+	peerRegistry := discovery.NewRegistry()
+
+	// Register callback to automatically connect to discovered peers
+	peerRegistry.AddDiscoveryCallback(func(discoveredPeerID string, address string, port int, capabilities map[string]interface{}, version string) {
+		// Only connect if we don't already have a connection
+		if _, err := connManager.GetConnection(discoveredPeerID); err != nil {
+			// Attempt to connect to the discovered peer
+			if err := networkMessenger.ConnectToPeer(discoveredPeerID, address, port); err != nil {
+				// Log error but don't fail - discovery is best effort
+				t.Logf("Failed to connect to discovered peer %s: %v", discoveredPeerID, err)
+			}
+		}
+	})
+
+	// Initialize UDP discovery service
+	capabilities := map[string]interface{}{
+		"encryption":  cfg.Security.EncryptionAlgorithm != "",
+		"compression": cfg.Compression.Enabled,
+		"chunking":    true,
+	}
+	udpDiscovery := discovery.NewUDPDiscoveryWithRegistry(cfg.Network.DiscoveryPort, peerID, capabilities, "1.0", peerRegistry)
+	if err := udpDiscovery.Start(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to start UDP discovery: %w", err)
+	}
+
 	// Initialize sync engine
 	syncEngine, err := syncpkg.NewEngineWithMessenger(cfg, db, peerID, networkMessenger)
 	if err != nil {
@@ -105,6 +135,9 @@ func (nth *NetworkTestHelper) SetupPeer(t *testing.T, peerName string, enableEnc
 	cleanup := func() {
 		syncEngine.Stop()
 		transport.Stop()
+		if udpDiscovery != nil {
+			udpDiscovery.Stop()
+		}
 		connManager.Stop()
 		db.Close()
 	}
@@ -118,6 +151,8 @@ func (nth *NetworkTestHelper) SetupPeer(t *testing.T, peerName string, enableEnc
 		Messenger:   networkMessenger,
 		SyncEngine:  syncEngine,
 		ConnManager: connManager,
+		Registry:    peerRegistry,
+		Discovery:   udpDiscovery,
 		Cleanup:     cleanup,
 	}
 
@@ -140,9 +175,19 @@ func (nth *NetworkTestHelper) ConnectPeers(peers []*NetworkPeerSetup) error {
 			peer1.Config.Network.Peers = append(peer1.Config.Network.Peers,
 				fmt.Sprintf("localhost:%d", peer2.Config.Network.Port))
 
-			// Attempt to establish connection
-			if err := nth.waitForConnection(peer1, peer2, 10*time.Second); err != nil {
+			// Initiate connection from peer1 to peer2
+			if err := peer1.Messenger.ConnectToPeer(peer2.ID, "localhost", peer2.Config.Network.Port); err != nil {
 				return fmt.Errorf("failed to connect peer %s to %s: %w", peer1.ID, peer2.ID, err)
+			}
+
+			// For test purposes, also register the connection on peer2's side
+			// In a real network, this would happen through incoming connection handling
+			peer2.ConnManager.AddConnection(peer1.ID, "localhost", peer1.Config.Network.Port)
+			peer2.ConnManager.UpdateConnectionState(peer1.ID, connection.StateConnected)
+
+			// Wait for connection to be established
+			if err := nth.waitForConnection(peer1, peer2, 10*time.Second); err != nil {
+				return fmt.Errorf("failed to establish connection between peer %s and %s: %w", peer1.ID, peer2.ID, err)
 			}
 		}
 	}
@@ -181,6 +226,40 @@ func (nth *NetworkTestHelper) waitForConnection(peer1, peer2 *NetworkPeerSetup, 
 			}
 		}
 	}
+}
+
+// NetworkOperationMonitoringMessenger wraps Messenger to intercept operations
+type NetworkOperationMonitoringMessenger struct {
+	innerMessenger syncpkg.Messenger
+	monitor        *NetworkOperationMonitor
+}
+
+func NewNetworkOperationMonitoringMessenger(inner syncpkg.Messenger, monitor *NetworkOperationMonitor) *NetworkOperationMonitoringMessenger {
+	return &NetworkOperationMonitoringMessenger{
+		innerMessenger: inner,
+		monitor:        monitor,
+	}
+}
+
+func (nomm *NetworkOperationMonitoringMessenger) SendFile(peerID string, fileData []byte, metadata *syncpkg.SyncOperation) error {
+	return nomm.innerMessenger.SendFile(peerID, fileData, metadata)
+}
+
+func (nomm *NetworkOperationMonitoringMessenger) BroadcastOperation(op *syncpkg.SyncOperation) error {
+	// Notify the monitor
+	nomm.monitor.OnOperationQueued(op)
+	return nomm.innerMessenger.BroadcastOperation(op)
+}
+
+func (nomm *NetworkOperationMonitoringMessenger) RequestStateSync(peerID string) error {
+	return nomm.innerMessenger.RequestStateSync(peerID)
+}
+
+func (nomm *NetworkOperationMonitoringMessenger) ConnectToPeer(peerID, address string, port int) error {
+	if networkMessenger, ok := nomm.innerMessenger.(*network.NetworkMessenger); ok {
+		return networkMessenger.ConnectToPeer(peerID, address, port)
+	}
+	return fmt.Errorf("inner messenger does not support ConnectToPeer")
 }
 
 // NetworkOperationMonitor monitors network operations and messages
@@ -322,6 +401,10 @@ func (nmi *NetworkMessageInterceptor) Stop() error {
 
 func (nmi *NetworkMessageInterceptor) SetMessageHandler(handler transport.MessageHandler) error {
 	return nmi.innerTransport.SetMessageHandler(handler)
+}
+
+func (nmi *NetworkMessageInterceptor) ConnectToPeer(peerID string, address string, port int) error {
+	return nmi.innerTransport.ConnectToPeer(peerID, address, port)
 }
 
 // WaitForPeerConnections waits for all peers to be connected to each other

@@ -239,6 +239,13 @@ func (q *QUICTransport) Connect(addr string) (*quic.Conn, error) {
 	})
 }
 
+// ConnectToPeer establishes an outbound connection to a peer and registers it
+func (q *QUICTransport) ConnectToPeer(peerID, address string, port int) error {
+	addr := fmt.Sprintf("%s:%d", address, port)
+	_, err := q.getOrCreateConnection(peerID, addr)
+	return err
+}
+
 // generateSelfSignedCert generates a self-signed certificate for testing
 // In production, this should use proper certificates
 func generateSelfSignedCert() tls.Certificate {

@@ -21,6 +21,7 @@ type Messenger interface {
 	SendFile(peerID string, fileData []byte, metadata *SyncOperation) error
 	BroadcastOperation(op *SyncOperation) error
 	RequestStateSync(peerID string) error
+	ConnectToPeer(peerID string, address string, port int) error
 }
 
 // Engine is the main sync engine

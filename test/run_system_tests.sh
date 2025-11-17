@@ -152,13 +152,13 @@ if [ "$RUN_FAST" = false ] && command -v docker &> /dev/null && command -v docke
 
     # Build test containers
     echo "Building test containers..."
-    docker-compose -f docker/docker-compose.yml build
+    docker-compose -f docker-compose.yml build
 
     # Run multi-peer network test
-    run_test "Docker Multi-Peer Network Test" "docker-compose -f docker/docker-compose.yml up --abort-on-container-exit --timeout 300"
+    run_test "Docker Multi-Peer Network Test" "docker-compose -f docker-compose.yml up --abort-on-container-exit --timeout 300"
 
     # Cleanup
-    docker-compose -f docker/docker-compose.yml down -v
+    docker-compose -f docker-compose.yml down -v
 elif [ "$RUN_FAST" = true ]; then
     echo -e "\n${YELLOW}Fast mode enabled - skipping Docker tests${NC}"
 else

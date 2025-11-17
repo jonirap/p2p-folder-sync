@@ -20,11 +20,11 @@ clean:
 
 # Build Docker image
 docker-build:
-	docker build -t p2p-sync:latest -f docker/Dockerfile .
+	docker build -t p2p-sync:latest -f Dockerfile .
 
 # Run integration tests in Docker
 docker-test:
-	docker-compose -f docker/docker-compose.yml up --abort-on-container-exit
+	docker-compose -f docker-compose.yml up --abort-on-container-exit
 
 # Run linters
 lint:

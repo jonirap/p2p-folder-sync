@@ -102,6 +102,11 @@ func (ft *FailingTransport) SetMessageHandler(handler transport.MessageHandler) 
 	return ft.innerTransport.SetMessageHandler(handler)
 }
 
+// ConnectToPeer connects to a peer
+func (ft *FailingTransport) ConnectToPeer(peerID string, address string, port int) error {
+	return ft.innerTransport.ConnectToPeer(peerID, address, port)
+}
+
 // EnableFailures enables failure simulation
 func (ft *FailingTransport) EnableFailures() {
 	ft.mu.Lock()
@@ -232,6 +237,11 @@ func (it *IntermittentTransport) SetMessageHandler(handler transport.MessageHand
 	return it.innerTransport.SetMessageHandler(handler)
 }
 
+// ConnectToPeer connects to a peer
+func (it *IntermittentTransport) ConnectToPeer(peerID string, address string, port int) error {
+	return it.innerTransport.ConnectToPeer(peerID, address, port)
+}
+
 // IsCurrentlyConnected returns whether the transport is currently in a "connected" state
 func (it *IntermittentTransport) IsCurrentlyConnected() bool {
 	it.mu.RLock()
@@ -282,6 +292,11 @@ func (pt *PartitioningTransport) Stop() error {
 // SetMessageHandler sets the message handler
 func (pt *PartitioningTransport) SetMessageHandler(handler transport.MessageHandler) error {
 	return pt.innerTransport.SetMessageHandler(handler)
+}
+
+// ConnectToPeer connects to a peer
+func (pt *PartitioningTransport) ConnectToPeer(peerID string, address string, port int) error {
+	return pt.innerTransport.ConnectToPeer(peerID, address, port)
 }
 
 // PartitionPeer marks a peer as partitioned (unreachable)

@@ -59,15 +59,35 @@ func (r *Reconciler) AssignFilesToPeers(peers map[string]*PeerState, files []str
 func (r *Reconciler) AssignFilesWithCapacity(peerCapabilities map[string]PeerCapabilities, currentLoad map[string]int, filesToSync []string) map[string][]string {
 	result := make(map[string][]string)
 
-	// Simple round-robin assignment ignoring capacity for now
-	peerIDs := make([]string, 0, len(peerCapabilities))
+	// Initialize result map for all peers
 	for peerID := range peerCapabilities {
-		peerIDs = append(peerIDs, peerID)
+		result[peerID] = make([]string, 0)
 	}
 
-	for i, file := range filesToSync {
-		peerID := peerIDs[i%len(peerIDs)]
-		result[peerID] = append(result[peerID], file)
+	// Calculate remaining capacity for each peer
+	remainingCapacity := make(map[string]int)
+	for peerID, capabilities := range peerCapabilities {
+		current := currentLoad[peerID]
+		remainingCapacity[peerID] = capabilities.MaxConcurrentTransfers - current
+	}
+
+	// Assign files respecting capacity limits
+	for _, file := range filesToSync {
+		// Find a peer with remaining capacity
+		assigned := false
+		for peerID, remaining := range remainingCapacity {
+			if remaining > 0 {
+				result[peerID] = append(result[peerID], file)
+				remainingCapacity[peerID]--
+				assigned = true
+				break
+			}
+		}
+
+		// If no peer has capacity, the file won't be assigned (which is correct behavior)
+		if !assigned {
+			// Could log that file couldn't be assigned due to capacity limits
+		}
 	}
 
 	return result

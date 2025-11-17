@@ -211,3 +211,9 @@ func (t *TCPTransport) Connect(address string, port int) (net.Conn, error) {
 	return conn, nil
 }
 
+// ConnectToPeer establishes an outbound connection to a peer and registers it
+func (t *TCPTransport) ConnectToPeer(peerID, address string, port int) error {
+	_, err := t.getOrCreateConnection(peerID, address, port)
+	return err
+}
+

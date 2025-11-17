@@ -616,6 +616,10 @@ func (itfm *InterceptingTransportForMessages) SetMessageHandler(handler transpor
 	return itfm.innerTransport.SetMessageHandler(handler)
 }
 
+func (itfm *InterceptingTransportForMessages) ConnectToPeer(peerID string, address string, port int) error {
+	return itfm.innerTransport.ConnectToPeer(peerID, address, port)
+}
+
 type ChunkMessage struct {
 	FileID      string
 	ChunkID     int
@@ -676,6 +680,10 @@ func (itfc *InterceptingTransportForChunks) Stop() error {
 
 func (itfc *InterceptingTransportForChunks) SetMessageHandler(handler transport.MessageHandler) error {
 	return itfc.innerTransport.SetMessageHandler(handler)
+}
+
+func (itfc *InterceptingTransportForChunks) ConnectToPeer(peerID string, address string, port int) error {
+	return itfc.innerTransport.ConnectToPeer(peerID, address, port)
 }
 
 type TestCompressionInterceptor struct {
@@ -764,4 +772,8 @@ func (itfc *InterceptingTransportForCompression) Stop() error {
 
 func (itfc *InterceptingTransportForCompression) SetMessageHandler(handler transport.MessageHandler) error {
 	return itfc.innerTransport.SetMessageHandler(handler)
+}
+
+func (itfc *InterceptingTransportForCompression) ConnectToPeer(peerID string, address string, port int) error {
+	return itfc.innerTransport.ConnectToPeer(peerID, address, port)
 }

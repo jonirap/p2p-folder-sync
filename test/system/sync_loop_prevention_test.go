@@ -37,6 +37,10 @@ func (omm *SyncLoopPreventionMessenger) RequestStateSync(peerID string) error {
 	return omm.innerMessenger.RequestStateSync(peerID)
 }
 
+func (omm *SyncLoopPreventionMessenger) ConnectToPeer(peerID string, address string, port int) error {
+	return omm.innerMessenger.ConnectToPeer(peerID, address, port)
+}
+
 // TestSyncLoopPreventionCritical tests the critical requirement that incoming remote file changes
 // do not trigger further synchronization operations. This is marked as CRITICAL in the spec.
 // This test verifies:

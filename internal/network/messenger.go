@@ -1,6 +1,7 @@
 package network
 
 import (
+	"crypto/rand"
 	"fmt"
 	"sync"
 	"time"
@@ -401,4 +402,32 @@ func (nm *NetworkMessenger) RequestStateSync(peerID string) error {
 	}
 
 	return nm.transport.SendMessage(peerID, conn.Address, conn.Port, msg)
+}
+
+// ConnectToPeer establishes a connection to a peer and performs session key exchange
+func (nm *NetworkMessenger) ConnectToPeer(peerID, address string, port int) error {
+	// Establish transport connection
+	if err := nm.transport.ConnectToPeer(peerID, address, port); err != nil {
+		return fmt.Errorf("failed to connect transport to peer %s: %w", peerID, err)
+	}
+
+	// Add connection to connection manager
+	nm.connManager.AddConnection(peerID, address, port)
+
+	// TODO: Perform session key exchange
+	// For now, we'll generate a simple session key
+	// In production, this would involve ECDH key exchange
+	sessionKey := make([]byte, 32)
+	if _, err := rand.Read(sessionKey); err != nil {
+		return fmt.Errorf("failed to generate session key: %w", err)
+	}
+
+	// Set the session key
+	if err := nm.connManager.SetSessionKey(peerID, sessionKey); err != nil {
+		return fmt.Errorf("failed to set session key for peer %s: %w", peerID, err)
+	}
+
+	nm.connManager.UpdateConnectionState(peerID, connection.StateConnected)
+
+	return nil
 }

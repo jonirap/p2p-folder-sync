@@ -12,6 +12,9 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Create necessary directories
+RUN mkdir -p /app/config /app/sync /app/data
+
 COPY --from=builder /app/p2p-sync /usr/local/bin/p2p-sync
 
 EXPOSE 8080 8081

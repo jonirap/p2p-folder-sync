@@ -312,3 +312,7 @@ func (omm *OperationMonitoringMessenger) BroadcastOperation(op *syncpkg.SyncOper
 func (omm *OperationMonitoringMessenger) RequestStateSync(peerID string) error {
 	return omm.innerMessenger.RequestStateSync(peerID)
 }
+
+func (omm *OperationMonitoringMessenger) ConnectToPeer(peerID string, address string, port int) error {
+	return omm.innerMessenger.ConnectToPeer(peerID, address, port)
+}

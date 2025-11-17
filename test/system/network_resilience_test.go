@@ -43,6 +43,10 @@ func (omm *NetworkResilienceMessenger) RequestStateSync(peerID string) error {
 	return omm.innerMessenger.RequestStateSync(peerID)
 }
 
+func (omm *NetworkResilienceMessenger) ConnectToPeer(peerID string, address string, port int) error {
+	return omm.innerMessenger.ConnectToPeer(peerID, address, port)
+}
+
 // TestNetworkResilienceConnectionRecovery tests network resilience and connection recovery
 // This test verifies:
 // - Operation queuing during network outages
