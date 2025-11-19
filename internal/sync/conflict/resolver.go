@@ -96,7 +96,8 @@ func (r *Resolver) lastWriteWins(op1, op2 *SyncOperation) *SyncOperation {
 // intelligentMerge attempts intelligent merge (3-way merge for text files)
 func (r *Resolver) intelligentMerge(op1, op2 *SyncOperation) (*SyncOperation, error) {
 	// Check if files are text files (simple heuristic: check if data is text)
-	if isTextFile(op1.Data) && isTextFile(op2.Data) {
+	// Need to have data to merge
+	if len(op1.Data) > 0 && len(op2.Data) > 0 && isTextFile(op1.Data) && isTextFile(op2.Data) {
 		// Attempt 3-way merge
 		merged, err := ThreeWayMerge(op1, op2)
 		if err == nil {
@@ -149,21 +150,129 @@ func (r *Resolver) ResolveLWW(op1, op2 *SyncOperation) (*SyncOperation, error) {
 
 // Resolve3Way performs a string-based 3-way merge for tests
 func (r *Resolver) Resolve3Way(base, branch1, branch2 string) (string, error) {
-	// Create temporary SyncOperation structs from strings
-	op1 := &SyncOperation{
-		Data: []byte(branch1),
+	// Perform a true 3-way merge with conflict detection
+	return threeWayMergeWithBase(base, branch1, branch2)
+}
+
+// threeWayMergeWithBase performs a proper 3-way merge with conflict markers
+func threeWayMergeWithBase(base, branch1, branch2 string) (string, error) {
+	baseLines := strings.Split(base, "\n")
+	lines1 := strings.Split(branch1, "\n")
+	lines2 := strings.Split(branch2, "\n")
+
+	// Check if either branch is identical to base
+	if branch1 == base {
+		return branch2, nil
 	}
-	op2 := &SyncOperation{
-		Data: []byte(branch2),
+	if branch2 == base {
+		return branch1, nil
+	}
+	if branch1 == branch2 {
+		return branch1, nil
 	}
 
-	// Use existing ThreeWayMerge function
-	merged, err := ThreeWayMerge(op1, op2)
-	if err != nil {
-		return "", err
+	// Find common prefix and suffix with base
+	commonPrefix := findCommonPrefixCount(baseLines, lines1, lines2)
+	commonSuffix := findCommonSuffixCount(baseLines, lines1, lines2)
+
+	// Extract middle sections (the changes)
+	baseMiddle := extractMiddle(baseLines, commonPrefix, commonSuffix)
+	middle1 := extractMiddle(lines1, commonPrefix, commonSuffix)
+	middle2 := extractMiddle(lines2, commonPrefix, commonSuffix)
+
+	// Check if changes conflict
+	if !arraysEqual(baseMiddle, middle1) && !arraysEqual(baseMiddle, middle2) && !arraysEqual(middle1, middle2) {
+		// Both sides changed - this is a conflict
+		result := make([]string, 0)
+
+		// Add common prefix
+		result = append(result, baseLines[:commonPrefix]...)
+
+		// Add conflict markers
+		result = append(result, "<<<<<<< HEAD")
+		result = append(result, middle1...)
+		result = append(result, "=======")
+		result = append(result, middle2...)
+		result = append(result, ">>>>>>> remote")
+
+		// Add common suffix
+		if commonSuffix > 0 {
+			result = append(result, baseLines[len(baseLines)-commonSuffix:]...)
+		}
+
+		return strings.Join(result, "\n"), nil
 	}
 
-	return string(merged.Data), nil
+	// No conflict - one side changed or both made same change
+	if !arraysEqual(baseMiddle, middle1) {
+		// Branch1 changed, use it
+		return branch1, nil
+	}
+	// Branch2 changed (or both made same change), use it
+	return branch2, nil
+}
+
+// findCommonPrefixCount finds count of common lines at the start
+func findCommonPrefixCount(base, lines1, lines2 []string) int {
+	minLen := min3(len(base), len(lines1), len(lines2))
+	count := 0
+	for i := 0; i < minLen; i++ {
+		if base[i] == lines1[i] && base[i] == lines2[i] {
+			count++
+		} else {
+			break
+		}
+	}
+	return count
+}
+
+// findCommonSuffixCount finds count of common lines at the end
+func findCommonSuffixCount(base, lines1, lines2 []string) int {
+	minLen := min3(len(base), len(lines1), len(lines2))
+	count := 0
+	for i := 1; i <= minLen; i++ {
+		if base[len(base)-i] == lines1[len(lines1)-i] && base[len(base)-i] == lines2[len(lines2)-i] {
+			count++
+		} else {
+			break
+		}
+	}
+	return count
+}
+
+// extractMiddle extracts the middle section excluding prefix and suffix
+func extractMiddle(lines []string, prefixCount, suffixCount int) []string {
+	if prefixCount+suffixCount >= len(lines) {
+		return []string{}
+	}
+	return lines[prefixCount : len(lines)-suffixCount]
+}
+
+// arraysEqual checks if two string arrays are equal
+func arraysEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// min3 returns the minimum of three integers
+func min3(a, b, c int) int {
+	if a < b {
+		if a < c {
+			return a
+		}
+		return c
+	}
+	if b < c {
+		return b
+	}
+	return c
 }
 
 // ResolveLWWFallback performs string-based LWW for fallback scenarios

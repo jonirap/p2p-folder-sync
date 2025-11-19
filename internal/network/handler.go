@@ -189,10 +189,15 @@ func (h *NetworkMessageHandler) handleFileRequest(msg *messages.Message) error {
 
 // handleSyncOperation handles sync operation messages (file operations)
 func (h *NetworkMessageHandler) handleSyncOperation(msg *messages.Message) error {
+	fmt.Printf("DEBUG [Handler]: handleSyncOperation called for message from %s\n", msg.SenderID)
+
 	payload, ok := msg.Payload.(*messages.LogEntryPayload)
 	if !ok {
+		fmt.Printf("DEBUG [Handler]: Payload is not LogEntryPayload, type=%T\n", msg.Payload)
 		return fmt.Errorf("invalid sync operation payload")
 	}
+
+	fmt.Printf("DEBUG [Handler]: Got LogEntryPayload, type=%s, path=%s\n", payload.Type, payload.Path)
 
 	// Convert LogEntryPayload to SyncOperation
 	syncOp := &syncpkg.SyncOperation{
@@ -235,14 +240,17 @@ func (h *NetworkMessageHandler) handleSyncOperation(msg *messages.Message) error
 	case syncpkg.OpCreate, syncpkg.OpUpdate:
 		// File data is included in the payload for small files
 		fileData := payload.Data
+		fmt.Printf("DEBUG [Handler]: File data length: %d bytes\n", len(fileData))
 		if len(fileData) == 0 {
 			// Large file, expect chunks to follow
 			// For now, just acknowledge and wait for chunks
+			fmt.Printf("DEBUG [Handler]: No file data, waiting for chunks\n")
 			return h.sendAcknowledgment(msg, true, "")
 		}
 
 		// Decompress if needed
 		if syncOp.Compressed != nil && *syncOp.Compressed {
+			fmt.Printf("DEBUG [Handler]: Decompressing file data\n")
 			decompressed, err := h.decompressFileData(fileData, syncOp.CompressionAlgorithm)
 			if err != nil {
 				return h.sendAcknowledgment(msg, false, fmt.Sprintf("decompression failed: %v", err))
@@ -251,9 +259,16 @@ func (h *NetworkMessageHandler) handleSyncOperation(msg *messages.Message) error
 		}
 
 		// Handle the incoming file
+		fmt.Printf("DEBUG [Handler]: Calling HandleIncomingFile for %s (%d bytes)\n", syncOp.Path, len(fileData))
+		if h.syncEngine == nil {
+			fmt.Printf("DEBUG [Handler]: ERROR - syncEngine is nil!\n")
+			return h.sendAcknowledgment(msg, false, "sync engine not available")
+		}
 		if err := h.syncEngine.HandleIncomingFile(fileData, syncOp); err != nil {
+			fmt.Printf("DEBUG [Handler]: HandleIncomingFile failed: %v\n", err)
 			return h.sendAcknowledgment(msg, false, fmt.Sprintf("file handling failed: %v", err))
 		}
+		fmt.Printf("DEBUG [Handler]: HandleIncomingFile succeeded for %s\n", syncOp.Path)
 
 	case syncpkg.OpDelete:
 		// Handle delete operation

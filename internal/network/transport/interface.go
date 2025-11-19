@@ -30,13 +30,13 @@ type TransportFactory struct{}
 func (f *TransportFactory) NewTransport(protocol string, port int) (Transport, error) {
 	switch protocol {
 	case "quic":
+		// Explicit QUIC only (no fallback)
 		return NewQUICTransport(port), nil
 	case "tcp":
+		// Explicit TCP only (no fallback)
 		return NewTCPTransport(port), nil
 	default:
-		// Default to QUIC with TCP fallback
-		transport := NewQUICTransport(port)
-		// TODO: Implement fallback logic if QUIC fails
-		return transport, nil
+		// Default to automatic QUIC-to-TCP fallback (spec lines 612-614)
+		return NewFallbackTransport(port), nil
 	}
 }

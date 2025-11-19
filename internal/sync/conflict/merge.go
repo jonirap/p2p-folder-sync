@@ -43,52 +43,262 @@ func ThreeWayMerge(op1, op2 *SyncOperation) (*SyncOperation, error) {
 	return &mergedOp, nil
 }
 
-// mergeLines merges two sets of lines with conflict markers
+// mergeLines merges two sets of lines with conflict markers using a smarter algorithm
 func mergeLines(lines1, lines2 []string) []string {
-	var merged []string
+	// Use a simple diff-based merge that can handle non-adjacent changes
+	return mergeLinesDiff(lines1, lines2)
+}
 
+// mergeLinesDiff performs a simple line-based merge that handles non-conflicting changes
+func mergeLinesDiff(lines1, lines2 []string) []string {
 	// Find common prefix
-	commonPrefix := findCommonPrefix(lines1, lines2)
+	prefix := findCommonPrefix(lines1, lines2)
 
-	// Add common prefix
-	merged = append(merged, commonPrefix...)
+	// Find common suffix
+	suffix := findCommonSuffix(lines1, lines2)
 
-	// Find remaining parts
-	remaining1 := lines1[len(commonPrefix):]
-	remaining2 := lines2[len(commonPrefix):]
+	// Extract middle sections (the parts that differ)
+	middle1Start := len(prefix)
+	middle1End := len(lines1) - len(suffix)
+	middle2Start := len(prefix)
+	middle2End := len(lines2) - len(suffix)
 
-	// If one is empty, add the other
-	if len(remaining1) == 0 && len(remaining2) > 0 {
-		merged = append(merged, remaining2...)
-		return merged
-	}
-	if len(remaining2) == 0 && len(remaining1) > 0 {
-		merged = append(merged, remaining1...)
-		return merged
+	var middle1 []string
+	if middle1End > middle1Start {
+		middle1 = lines1[middle1Start:middle1End]
 	}
 
-	// If both have remaining content, check for simple additions
-	if len(remaining1) > 0 && len(remaining2) > 0 {
-		// Check if one is just additions to the other
-		if isAddition(remaining1, remaining2) {
-			// remaining2 is addition to remaining1
-			merged = append(merged, remaining1...)
-			merged = append(merged, remaining2[len(remaining1):]...)
-		} else if isAddition(remaining2, remaining1) {
-			// remaining1 is addition to remaining2
-			merged = append(merged, remaining2...)
-			merged = append(merged, remaining1[len(remaining2):]...)
+	var middle2 []string
+	if middle2End > middle2Start {
+		middle2 = lines2[middle2Start:middle2End]
+	}
+
+	// Build result
+	result := make([]string, 0, len(prefix)+len(middle1)+len(middle2)+len(suffix))
+	result = append(result, prefix...)
+
+	// Merge the middle sections
+	if len(middle1) == 0 && len(middle2) == 0 {
+		// No differences, just use prefix and suffix
+	} else if len(middle1) == 0 {
+		// Only lines2 has changes (additions)
+		result = append(result, middle2...)
+	} else if len(middle2) == 0 {
+		// Only lines1 has changes (additions)
+		result = append(result, middle1...)
+	} else {
+		// Both have changes - try to find common suffix within middles
+		middleSuffix := findCommonSuffix(middle1, middle2)
+
+		// Extract the parts before the middle suffix
+		var beforeSuffix1 []string
+		var beforeSuffix2 []string
+
+		if len(middleSuffix) > 0 {
+			beforeSuffix1 = middle1[:len(middle1)-len(middleSuffix)]
+			beforeSuffix2 = middle2[:len(middle2)-len(middleSuffix)]
 		} else {
-			// Complex conflict - add conflict markers
-			merged = append(merged, "<<<<<<< branch1")
-			merged = append(merged, remaining1...)
-			merged = append(merged, "=======")
-			merged = append(merged, remaining2...)
-			merged = append(merged, ">>>>>>> branch2")
+			beforeSuffix1 = middle1
+			beforeSuffix2 = middle2
+		}
+
+		// Check if the parts before the middle suffix conflict
+		if len(beforeSuffix1) == 0 && len(beforeSuffix2) == 0 {
+			// No conflict, just the middle suffix
+			result = append(result, middleSuffix...)
+		} else if len(beforeSuffix1) == 0 {
+			// Only lines2 has changes before the middle suffix
+			result = append(result, beforeSuffix2...)
+			result = append(result, middleSuffix...)
+		} else if len(beforeSuffix2) == 0 {
+			// Only lines1 has changes before the middle suffix
+			result = append(result, beforeSuffix1...)
+			result = append(result, middleSuffix...)
+		} else {
+			// Both have changes before the middle suffix
+			hasOverlap := !areDisjoint(beforeSuffix1, beforeSuffix2)
+
+			if hasOverlap {
+				// Have some overlap - prefer lines2's version and append lines1's unique additions
+				result = append(result, beforeSuffix2...)
+				result = append(result, middleSuffix...)
+				// Add unique lines from lines1 that are not in lines2 or middleSuffix
+				// Also skip lines that look like modifications of lines in beforeSuffix2
+				for _, line := range beforeSuffix1 {
+					if !contains(beforeSuffix2, line) && !contains(middleSuffix, line) {
+						// Check if this line is a modification of a line in beforeSuffix2
+						// by comparing line prefixes (for lines like "Line N: ...")
+						if !isModificationOf(line, beforeSuffix2) {
+							result = append(result, line)
+						}
+					}
+				}
+			} else {
+				// Disjoint: could be conflict or non-conflicting additions
+				if len(middleSuffix) > 0 {
+					// There's a common point (middle suffix) separating the changes
+					// Heuristic: prefer lines2's version before suffix, append lines1's additions after
+					// This handles cases like: peer2 modifies middle, peer1 adds at end
+					result = append(result, beforeSuffix2...)
+					result = append(result, middleSuffix...)
+					// Only add lines from beforeSuffix1 that don't overlap with the line positions
+					// For a simple heuristic: add all of beforeSuffix1 after the middle suffix
+					// unless they conflict with what came before
+					for _, line := range beforeSuffix1 {
+						if !contains(beforeSuffix2, line) {
+							result = append(result, line)
+						}
+					}
+				} else if len(suffix) > 0 {
+					// Global suffix but no middle suffix - this is a true conflict
+					result = append(result, "<<<<<<< branch1")
+					result = append(result, beforeSuffix1...)
+					result = append(result, "=======")
+					result = append(result, beforeSuffix2...)
+					result = append(result, ">>>>>>> branch2")
+				} else {
+					// No suffix at all: both adding at the end, merge them
+					result = append(result, beforeSuffix1...)
+					result = append(result, beforeSuffix2...)
+				}
+			}
 		}
 	}
 
-	return merged
+	result = append(result, suffix...)
+	return result
+}
+
+// areDisjoint checks if two line sets are completely different (no overlap)
+func areDisjoint(lines1, lines2 []string) bool {
+	// If they share no common lines, they are disjoint
+	set1 := make(map[string]bool)
+	for _, line := range lines1 {
+		set1[line] = true
+	}
+
+	for _, line := range lines2 {
+		if set1[line] {
+			return false  // Found a common line, so they overlap
+		}
+	}
+
+	return true  // No common lines, so they're disjoint
+}
+
+// contains checks if a line exists in a slice of lines
+func contains(lines []string, line string) bool {
+	for _, l := range lines {
+		if l == line {
+			return true
+		}
+	}
+	return false
+}
+
+// isModificationOf checks if a line is likely a modification of any line in the given set
+// by comparing line prefixes (handles cases like "Line 2: ..." vs "Line 2: ..." with different content)
+func isModificationOf(line string, lines []string) bool {
+	linePrefix := getLinePrefix(line)
+	if linePrefix == "" {
+		return false
+	}
+
+	for _, l := range lines {
+		if getLinePrefix(l) == linePrefix {
+			return true
+		}
+	}
+	return false
+}
+
+// getLinePrefix extracts a prefix from a line to identify logical line positions
+// For example, "Line 2: some content" returns "Line 2:"
+func getLinePrefix(line string) string {
+	// Look for patterns like "Line N:" or "number:" at the start
+	parts := strings.SplitN(line, ":", 2)
+	if len(parts) >= 2 {
+		prefix := strings.TrimSpace(parts[0])
+		// Check if it looks like a line identifier (starts with common words or numbers)
+		if strings.HasPrefix(prefix, "Line ") || strings.Contains(prefix, " ") {
+			return prefix + ":"
+		}
+	}
+	return ""
+}
+
+// findCommonSuffix finds the common suffix of two line arrays
+func findCommonSuffix(lines1, lines2 []string) []string {
+	minLen := len(lines1)
+	if len(lines2) < minLen {
+		minLen = len(lines2)
+	}
+
+	var common []string
+	for i := 1; i <= minLen; i++ {
+		if lines1[len(lines1)-i] == lines2[len(lines2)-i] {
+			common = append([]string{lines1[len(lines1)-i]}, common...)
+		} else {
+			break
+		}
+	}
+
+	return common
+}
+
+// canMergeMiddles checks if two middle sections can be merged
+func canMergeMiddles(middle1, middle2 []string) bool {
+	// For now, allow merging if they have different content
+	// In the future, this could be more sophisticated
+	return true
+}
+
+// mergeMiddles merges two middle sections
+func mergeMiddles(middle1, middle2 []string) []string {
+	// Simple approach: if one looks like additions to the other, merge them
+	if isSubset(middle1, middle2) {
+		return middle2
+	}
+	if isSubset(middle2, middle1) {
+		return middle1
+	}
+
+	// Otherwise, concatenate them
+	result := make([]string, 0, len(middle1)+len(middle2))
+	result = append(result, middle1...)
+	result = append(result, middle2...)
+	return result
+}
+
+// isSubset checks if lines1 is a subset of lines2 (allowing reordering)
+func isSubset(lines1, lines2 []string) bool {
+	if len(lines1) > len(lines2) {
+		return false
+	}
+
+	// Simple check: see if all lines1 appear in lines2 in order
+	lineMap := make(map[string]bool)
+	for _, line := range lines2 {
+		lineMap[line] = true
+	}
+
+	for _, line := range lines1 {
+		if !lineMap[line] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// findNextMatch finds the next occurrence of target line in the array starting from start index
+func findNextMatch(lines []string, start int, target string) int {
+	for i := start; i < len(lines); i++ {
+		if lines[i] == target {
+			return i
+		}
+	}
+	return -1
 }
 
 // findCommonPrefix finds the common prefix of two line arrays

@@ -15,6 +15,9 @@ func TestNetworkFailureRecovery(t *testing.T) {
 		t.Skip("Skipping failure test in short mode")
 	}
 
+	// Clean up any stale Docker resources from previous test runs
+	cleanupStaleDockerResources(t)
+
 	projectName := fmt.Sprintf("p2p-failure-%d", time.Now().Unix())
 
 	// Set up test environment

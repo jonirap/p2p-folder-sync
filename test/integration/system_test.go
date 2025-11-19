@@ -507,6 +507,22 @@ observability:
 				t.Fatalf("Failed to write config file: %v", err)
 			}
 
+			// Save and clear environment variables that might override config validation
+			oldPort := os.Getenv("P2P_PORT")
+			oldDiscoveryPort := os.Getenv("P2P_DISCOVERY_PORT")
+			os.Unsetenv("P2P_PORT")
+			os.Unsetenv("P2P_DISCOVERY_PORT")
+
+			// Restore environment variables after test
+			defer func() {
+				if oldPort != "" {
+					os.Setenv("P2P_PORT", oldPort)
+				}
+				if oldDiscoveryPort != "" {
+					os.Setenv("P2P_DISCOVERY_PORT", oldDiscoveryPort)
+				}
+			}()
+
 			_, err := config.LoadConfig(configPath)
 			if tc.expectError && err == nil {
 				t.Error("Expected configuration to fail validation")

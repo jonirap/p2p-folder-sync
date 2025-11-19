@@ -55,6 +55,9 @@ func loadFromEnv(cfg *Config) {
 			cfg.Network.DiscoveryPort = port
 		}
 	}
+	if val := os.Getenv("P2P_PROTOCOL"); val != "" {
+		cfg.Network.Protocol = val
+	}
 
 	// Manual peer list
 	if val := os.Getenv("PEERS"); val != "" {

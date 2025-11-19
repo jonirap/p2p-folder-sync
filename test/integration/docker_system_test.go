@@ -26,6 +26,9 @@ func TestDockerComposeSystem(t *testing.T) {
 		t.Skip("Docker Compose not available, skipping system test")
 	}
 
+	// Clean up any stale Docker resources from previous test runs
+	cleanupStaleDockerResources(t)
+
 	projectName := fmt.Sprintf("p2p-test-%d", time.Now().Unix())
 
 	// Set up test environment
@@ -282,6 +285,10 @@ func checkServicesHealthy(t *testing.T, projectName string) bool {
 func testBasicFileSync(t *testing.T, projectName string) {
 	t.Log("Testing basic file synchronization...")
 
+	// Wait for peers to establish connections
+	t.Log("Waiting for peers to connect...")
+	time.Sleep(3 * time.Second)
+
 	// Create a test file in peer-alpha
 	testContent := "Hello from peer-alpha!"
 	createFileInContainer(t, projectName, "peer-alpha", "/app/sync/test.txt", testContent)
@@ -290,6 +297,17 @@ func testBasicFileSync(t *testing.T, projectName string) {
 	time.Sleep(5 * time.Second)
 
 	// Check if file exists in peer-beta
+	defer func() {
+		if t.Failed() {
+			t.Log("=== peer-alpha logs ===")
+			t.Log(getContainerLogs(t, projectName, "peer-alpha", 50))
+			t.Log("=== peer-beta logs ===")
+			t.Log(getContainerLogs(t, projectName, "peer-beta", 50))
+			t.Log("=== peer-gamma logs ===")
+			t.Log(getContainerLogs(t, projectName, "peer-gamma", 50))
+		}
+	}()
+
 	content := readFileFromContainer(t, projectName, "peer-beta", "/app/sync/test.txt")
 	if content != testContent {
 		t.Errorf("File sync failed: expected %q, got %q", testContent, content)
@@ -474,9 +492,9 @@ func readFileFromContainer(t *testing.T, projectName, container, filePath string
 	cmd := exec.Command("docker", "exec", fmt.Sprintf("%s-%s-1", projectName, container),
 		"cat", filePath)
 
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("Failed to read file from container %s: %v", container, err)
+		t.Fatalf("Failed to read file from container %s: %v\nOutput: %s", container, err, string(output))
 	}
 
 	return strings.TrimSpace(string(output))
@@ -486,9 +504,9 @@ func getFileSizeInContainer(t *testing.T, projectName, container, filePath strin
 	cmd := exec.Command("docker", "exec", fmt.Sprintf("%s-%s-1", projectName, container),
 		"stat", "-c", "%s", filePath)
 
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("Failed to get file size from container %s: %v", container, err)
+		t.Fatalf("Failed to get file size from container %s: %v\nOutput: %s", container, err, string(output))
 	}
 
 	var size int
@@ -510,6 +528,16 @@ func startContainer(t *testing.T, projectName, container string) {
 	if err != nil {
 		t.Fatalf("Failed to start container %s: %v\nOutput: %s", container, err, output)
 	}
+}
+
+func getContainerLogs(t *testing.T, projectName, container string, lines int) string {
+	cmd := exec.Command("docker", "logs", "--tail", fmt.Sprintf("%d", lines), fmt.Sprintf("%s-%s-1", projectName, container))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("Failed to get logs from container %s: %v", container, err)
+		return ""
+	}
+	return string(output)
 }
 
 // copyDir recursively copies a directory from src to dst
@@ -540,4 +568,63 @@ func copyDir(src, dst string) error {
 
 		return os.WriteFile(destPath, data, 0644)
 	})
+}
+
+// cleanupStaleDockerResources removes any leftover Docker containers and networks from previous test runs
+func cleanupStaleDockerResources(t *testing.T) {
+	// Stop and remove all p2p-test containers
+	cmd := exec.Command("sh", "-c", "docker ps -a -q --filter name=p2p-test | xargs -r docker rm -f")
+	output, _ := cmd.CombinedOutput()
+	if len(output) > 0 {
+		t.Logf("Cleaned up stale containers: %s", output)
+	}
+
+	cmd = exec.Command("sh", "-c", "docker ps -a -q --filter name=p2p-partition | xargs -r docker rm -f")
+	output, _ = cmd.CombinedOutput()
+	if len(output) > 0 {
+		t.Logf("Cleaned up stale partition containers: %s", output)
+	}
+
+	cmd = exec.Command("sh", "-c", "docker ps -a -q --filter name=p2p-reliability | xargs -r docker rm -f")
+	output, _ = cmd.CombinedOutput()
+	if len(output) > 0 {
+		t.Logf("Cleaned up stale reliability containers: %s", output)
+	}
+
+	cmd = exec.Command("sh", "-c", "docker ps -a -q --filter name=p2p-config | xargs -r docker rm -f")
+	output, _ = cmd.CombinedOutput()
+	if len(output) > 0 {
+		t.Logf("Cleaned up stale config containers: %s", output)
+	}
+
+	// Remove all p2p-test networks
+	cmd = exec.Command("sh", "-c", "docker network ls -q --filter name=p2p-test | xargs -r docker network rm")
+	output, _ = cmd.CombinedOutput()
+	if len(output) > 0 {
+		t.Logf("Cleaned up stale test networks: %s", output)
+	}
+
+	cmd = exec.Command("sh", "-c", "docker network ls -q --filter name=p2p-partition | xargs -r docker network rm")
+	output, _ = cmd.CombinedOutput()
+	if len(output) > 0 {
+		t.Logf("Cleaned up stale partition networks: %s", output)
+	}
+
+	cmd = exec.Command("sh", "-c", "docker network ls -q --filter name=p2p-reliability | xargs -r docker network rm")
+	output, _ = cmd.CombinedOutput()
+	if len(output) > 0 {
+		t.Logf("Cleaned up stale reliability networks: %s", output)
+	}
+
+	cmd = exec.Command("sh", "-c", "docker network ls -q --filter name=p2p-config | xargs -r docker network rm")
+	output, _ = cmd.CombinedOutput()
+	if len(output) > 0 {
+		t.Logf("Cleaned up stale config networks: %s", output)
+	}
+
+	// Prune unused networks
+	cmd = exec.Command("docker", "network", "prune", "-f")
+	cmd.Run()
+
+	t.Logf("Docker cleanup completed")
 }

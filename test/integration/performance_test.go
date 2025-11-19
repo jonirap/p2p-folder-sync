@@ -347,6 +347,9 @@ func TestReliability(t *testing.T) {
 		t.Skip("Skipping reliability test in short mode")
 	}
 
+	// Clean up any stale Docker resources from previous test runs
+	cleanupStaleDockerResources(t)
+
 	projectName := fmt.Sprintf("p2p-reliability-%d", time.Now().Unix())
 
 	testDir := t.TempDir()

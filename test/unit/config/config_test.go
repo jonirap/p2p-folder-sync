@@ -46,6 +46,22 @@ compression:
 		t.Fatalf("Failed to write test config file: %v", err)
 	}
 
+	// Save and clear environment variables that might override config
+	oldPort := os.Getenv("P2P_PORT")
+	oldDiscoveryPort := os.Getenv("P2P_DISCOVERY_PORT")
+	os.Unsetenv("P2P_PORT")
+	os.Unsetenv("P2P_DISCOVERY_PORT")
+
+	// Restore environment variables after test
+	defer func() {
+		if oldPort != "" {
+			os.Setenv("P2P_PORT", oldPort)
+		}
+		if oldDiscoveryPort != "" {
+			os.Setenv("P2P_DISCOVERY_PORT", oldDiscoveryPort)
+		}
+	}()
+
 	loadedCfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		t.Fatalf("Failed to load config from file: %v", err)

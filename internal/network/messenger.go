@@ -1,8 +1,13 @@
 package network
 
 import (
+	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -11,6 +16,7 @@ import (
 	"github.com/p2p-folder-sync/p2p-sync/internal/config"
 	"github.com/p2p-folder-sync/p2p-sync/internal/crypto"
 	"github.com/p2p-folder-sync/p2p-sync/internal/network/connection"
+	"github.com/p2p-folder-sync/p2p-sync/internal/network/flowcontrol"
 	"github.com/p2p-folder-sync/p2p-sync/internal/network/messages"
 	"github.com/p2p-folder-sync/p2p-sync/internal/network/transport"
 	syncpkg "github.com/p2p-folder-sync/p2p-sync/internal/sync"
@@ -23,8 +29,9 @@ type NetworkMessenger struct {
 	transport      transport.Transport
 	compressor     compression.Compressor
 	chunker        *chunking.Chunker
-	messageHandler MessageHandler        // Application-level message handler
-	pendingAcks    map[string]chan error // messageID -> ack channel
+	flowController *flowcontrol.FlowController // Bandwidth and concurrency control
+	messageHandler MessageHandler              // Application-level message handler
+	pendingAcks    map[string]chan error       // messageID -> ack channel
 	pendingAcksMu  sync.RWMutex
 	ackTimeout     time.Duration
 	retryCount     int
@@ -43,27 +50,46 @@ func NewNetworkMessenger(cfg *config.Config, connManager *connection.ConnectionM
 	// Create chunker
 	chunker := chunking.NewChunker(cfg.Sync.ChunkSizeDefault)
 
+	// Create flow controller with 10MB/s global bandwidth and 5 concurrent transfers
+	flowController := flowcontrol.NewFlowController(10*1024*1024, 5)
+
 	messenger := &NetworkMessenger{
-		config:      cfg,
-		connManager: connManager,
-		transport:   transport,
-		compressor:  compressor,
-		chunker:     chunker,
-		pendingAcks: make(map[string]chan error),
-		ackTimeout:  30 * time.Second, // 30s timeout for acknowledgments
-		retryCount:  3,                // Retry failed sends up to 3 times
-		retryDelay:  1 * time.Second,  // 1s delay between retries
-		peerID:      peerID,
+		config:         cfg,
+		connManager:    connManager,
+		transport:      transport,
+		compressor:     compressor,
+		chunker:        chunker,
+		flowController: flowController,
+		pendingAcks:    make(map[string]chan error),
+		ackTimeout:     30 * time.Second, // 30s timeout for acknowledgments
+		retryCount:     3,                // Retry failed sends up to 3 times
+		retryDelay:     1 * time.Second,  // 1s delay between retries
+		peerID:         peerID,
 	}
 
 	// Set up message handler for receiving acknowledgments
 	transport.SetMessageHandler(messenger)
+
+	// Try to inject connection manager if transport supports it
+	// This is a bit of a hack, but necessary for TCP transport to register incoming connections
+	if tcpTransport, ok := transport.(interface {
+		SetConnectionManager(*connection.ConnectionManager)
+	}); ok {
+		tcpTransport.SetConnectionManager(connManager)
+	}
 
 	return messenger, nil
 }
 
 // SendFile sends a file to a specific peer with compression, chunking, and encryption
 func (nm *NetworkMessenger) SendFile(peerID string, fileData []byte, metadata *syncpkg.SyncOperation) error {
+	// Acquire transfer slot for concurrency control
+	ctx := context.Background()
+	if err := nm.flowController.AcquireTransferSlot(ctx, metadata.FileID); err != nil {
+		return fmt.Errorf("failed to acquire transfer slot: %w", err)
+	}
+	defer nm.flowController.ReleaseTransferSlot(metadata.FileID)
+
 	// Check if peer is connected
 	conn, err := nm.connManager.GetConnection(peerID)
 	if err != nil {
@@ -118,7 +144,13 @@ func (nm *NetworkMessenger) sendChunkedFile(peerID string, fileData []byte, meta
 	}
 
 	// Send each chunk
+	ctx := context.Background()
 	for _, chunk := range chunks {
+		// Apply bandwidth limiting before sending chunk
+		if err := nm.flowController.Wait(ctx, metadata.FileID, chunk.Length); err != nil {
+			return fmt.Errorf("flow control failed for chunk %d: %w", chunk.ChunkID, err)
+		}
+
 		chunkMsg := messages.NewMessage(
 			messages.TypeChunk,
 			metadata.PeerID,
@@ -174,6 +206,14 @@ func (nm *NetworkMessenger) sendSyncOperation(peerID string, fileData []byte, me
 
 	msg := messages.NewMessage(messages.TypeSyncOperation, metadata.PeerID, payload)
 
+	// Apply bandwidth limiting for file data
+	if len(fileData) > 0 {
+		ctx := context.Background()
+		if err := nm.flowController.Wait(ctx, metadata.FileID, int64(len(fileData))); err != nil {
+			return fmt.Errorf("flow control failed: %w", err)
+		}
+	}
+
 	return nm.sendMessage(peerID, msg)
 }
 
@@ -181,7 +221,10 @@ func (nm *NetworkMessenger) sendSyncOperation(peerID string, fileData []byte, me
 func (nm *NetworkMessenger) BroadcastOperation(op *syncpkg.SyncOperation) error {
 	connectedPeers := nm.connManager.GetConnectedPeers()
 
+	log.Printf("DEBUG [NetworkMessenger]: BroadcastOperation called for %s %s, connected peers: %d", op.Type, op.Path, len(connectedPeers))
+
 	if len(connectedPeers) == 0 {
+		log.Printf("DEBUG [NetworkMessenger]: No peers connected, cannot broadcast %s %s", op.Type, op.Path)
 		// No peers connected, operation will be queued for later
 		return nil
 	}
@@ -195,8 +238,16 @@ func (nm *NetworkMessenger) BroadcastOperation(op *syncpkg.SyncOperation) error 
 
 		// For create/update operations, we need to read the file
 		if op.Type == syncpkg.OpCreate || op.Type == syncpkg.OpUpdate {
-			// Read file data and send to peer
-			if err := nm.SendFile(peerID, []byte{}, op); err != nil {
+			// Read file data from disk
+			filePath := filepath.Join(nm.config.Sync.FolderPath, op.Path)
+			fileData, err := os.ReadFile(filePath)
+			if err != nil {
+				lastErr = fmt.Errorf("failed to read file %s: %w", filePath, err)
+				continue
+			}
+
+			// Send file data to peer
+			if err := nm.SendFile(peerID, fileData, op); err != nil {
 				lastErr = fmt.Errorf("failed to send to peer %s: %w", peerID, err)
 			}
 		} else {
@@ -310,38 +361,84 @@ func (nm *NetworkMessenger) untrackAcknowledgment(messageID string) {
 
 // HandleMessage handles incoming messages (implements MessageHandler)
 func (nm *NetworkMessenger) HandleMessage(msg *messages.Message) error {
+	log.Printf("DEBUG [NetworkMessenger]: HandleMessage called, type=%s, sender=%s", msg.Type, msg.SenderID)
+
 	// Decrypt the message if it's encrypted
 	conn, err := nm.connManager.GetConnection(msg.SenderID)
 	if err != nil {
+		log.Printf("DEBUG [NetworkMessenger]: Unknown sender: %s", msg.SenderID)
 		return fmt.Errorf("unknown sender: %s", msg.SenderID)
 	}
 
+	log.Printf("DEBUG [NetworkMessenger]: Got connection for sender %s", msg.SenderID)
+
 	// Check if payload is encrypted
-	if encryptedMsg, ok := msg.Payload.(*crypto.EncryptedMessage); ok {
+	var encryptedMsg *crypto.EncryptedMessage
+	var ok bool
+
+	// Try direct type assertion first
+	if em, typeOk := msg.Payload.(*crypto.EncryptedMessage); typeOk {
+		encryptedMsg = em
+		ok = true
+	} else if payloadMap, mapOk := msg.Payload.(map[string]interface{}); mapOk {
+		// Check if it looks like an EncryptedMessage
+		if iv, hasIV := payloadMap["iv"]; hasIV {
+			if ct, hasCT := payloadMap["ciphertext"]; hasCT {
+				if tag, hasTag := payloadMap["tag"]; hasTag {
+					// Try to convert to byte slices
+					if ivBytes, ok1 := toByteSlice(iv); ok1 {
+						if ctBytes, ok2 := toByteSlice(ct); ok2 {
+							if tagBytes, ok3 := toByteSlice(tag); ok3 {
+								encryptedMsg = &crypto.EncryptedMessage{
+									IV:         ivBytes,
+									Ciphertext: ctBytes,
+									Tag:        tagBytes,
+								}
+								ok = true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if ok {
+		log.Printf("DEBUG [NetworkMessenger]: Found encrypted payload, decrypting")
 		// Decrypt the payload
 		decryptedData, err := crypto.Decrypt(encryptedMsg, conn.SessionKey)
 		if err != nil {
+			log.Printf("DEBUG [NetworkMessenger]: Decryption failed: %v", err)
 			return fmt.Errorf("failed to decrypt message: %w", err)
 		}
+		log.Printf("DEBUG [NetworkMessenger]: Decryption successful, %d bytes", len(decryptedData))
 
 		// Parse the decrypted payload
 		payload, err := messages.DecodePayload(decryptedData, msg.Type)
 		if err != nil {
+			log.Printf("DEBUG [NetworkMessenger]: Decode failed: %v", err)
 			return fmt.Errorf("failed to decode decrypted payload: %w", err)
 		}
+		log.Printf("DEBUG [NetworkMessenger]: Payload decoded successfully, type=%T", payload)
 		msg.Payload = payload
+	} else {
+		log.Printf("DEBUG [NetworkMessenger]: No encrypted payload detected")
 	}
 
+	log.Printf("DEBUG [NetworkMessenger]: Checking if acknowledgment message, type=%s", msg.Type)
 	// Handle acknowledgments
 	if msg.Type == messages.TypeOperationAck || msg.Type == messages.TypeChunkAck {
+		log.Printf("DEBUG [NetworkMessenger]: This is an acknowledgment, handling it")
 		return nm.handleAcknowledgment(msg)
 	}
 
 	// Forward decrypted message to application handler
 	if nm.messageHandler != nil {
+		log.Printf("DEBUG [NetworkMessenger]: Forwarding to application handler, type=%s", msg.Type)
 		return nm.messageHandler.HandleMessage(msg)
 	}
 
+	log.Printf("DEBUG [NetworkMessenger]: No message handler set!")
 	return nil
 }
 
@@ -430,4 +527,34 @@ func (nm *NetworkMessenger) ConnectToPeer(peerID, address string, port int) erro
 	nm.connManager.UpdateConnectionState(peerID, connection.StateConnected)
 
 	return nil
+}
+
+// toByteSlice converts an interface{} to []byte if possible
+func toByteSlice(v interface{}) ([]byte, bool) {
+	switch b := v.(type) {
+	case []byte:
+		return b, true
+	case []interface{}:
+		// JSON unmarshals byte slices as []interface{} with numbers
+		bytes := make([]byte, len(b))
+		for i, val := range b {
+			if num, ok := val.(float64); ok {
+				bytes[i] = byte(num)
+			} else {
+				return nil, false
+			}
+		}
+		return bytes, true
+	case string:
+		// Base64 encoded byte slices
+		if data, err := base64.StdEncoding.DecodeString(b); err == nil {
+			fmt.Printf("DEBUG: Successfully decoded base64 string to %d bytes\n", len(data))
+			return data, true
+		} else {
+			fmt.Printf("DEBUG: Failed to decode base64 string: %v\n", err)
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
 }

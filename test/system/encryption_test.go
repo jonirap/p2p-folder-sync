@@ -253,17 +253,6 @@ func TestMessageEncryption(t *testing.T) {
 	}
 	defer syncEngine2.Stop()
 
-	// Start sync engines
-	if err := syncEngine1.Start(ctx); err != nil {
-		t.Fatalf("Failed to start peer1 sync engine: %v", err)
-	}
-	defer syncEngine1.Stop()
-
-	if err := syncEngine2.Start(ctx); err != nil {
-		t.Fatalf("Failed to start peer2 sync engine: %v", err)
-	}
-	defer syncEngine2.Stop()
-
 	waiter := NewEventDrivenWaiterWithTimeout(15 * time.Second)
 	defer waiter.Close()
 
@@ -444,13 +433,31 @@ func TestManInTheMiddlePrevention(t *testing.T) {
 		t.Fatalf("Failed to create peer2 sync engine: %v", err)
 	}
 
-	// Register engines with messengers
-	messenger1.RegisterEngine("peer2", syncEngine2)
-	messenger2.RegisterEngine("peer1", syncEngine1)
+	// Register engines with messengers (each messenger needs both engines)
+	messenger1.RegisterEngine("peer1", syncEngine1) // Source engine
+	messenger1.RegisterEngine("peer2", syncEngine2) // Target engine
+	messenger2.RegisterEngine("peer2", syncEngine2) // Source engine
+	messenger2.RegisterEngine("peer1", syncEngine1) // Target engine
 
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Start sync engines
+	if err := syncEngine1.Start(ctx); err != nil {
+		t.Fatalf("Failed to start peer1 sync engine: %v", err)
+	}
+	defer syncEngine1.Stop()
+
+	if err := syncEngine2.Start(ctx); err != nil {
+		t.Fatalf("Failed to start peer2 sync engine: %v", err)
+	}
+	defer syncEngine2.Stop()
 
 	waiter := NewEventDrivenWaiterWithTimeout(15 * time.Second)
 	defer waiter.Close()
+
+	// Wait a bit for watchers to initialize
+	time.Sleep(2 * time.Second)
 
 	// Test 1: Verify that encrypted communication works normally (no MITM)
 	t.Log("Test 1: Verifying normal encrypted communication works...")
@@ -781,6 +788,10 @@ func TestCertificateValidation(t *testing.T) {
 
 // TestKeyRotation tests periodic key rotation
 func TestKeyRotation(t *testing.T) {
+	// Enable testing mode to allow short key rotation intervals
+	os.Setenv("P2P_TESTING_MODE", "true")
+	defer os.Unsetenv("P2P_TESTING_MODE")
+
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "key_rotation_config.yaml")
 
@@ -860,42 +871,30 @@ func TestEncryptedFileSync(t *testing.T) {
 	}
 	defer db2.Close()
 
-	transportFactory := &transport.TransportFactory{}
+	// Initialize messengers (using in-memory for testing)
+	messenger1 := sync.NewInMemoryMessenger()
+	messenger2 := sync.NewInMemoryMessenger()
 
-	transport1, err := transportFactory.NewTransport("tcp", cfg1.Network.Port)
-	if err != nil {
-		t.Fatalf("Failed to create transport1: %v", err)
-	}
-
-	transport2, err := transportFactory.NewTransport("tcp", cfg2.Network.Port)
-	if err != nil {
-		t.Fatalf("Failed to create transport2: %v", err)
-	}
-
-	syncEngine1, err := sync.NewEngine(cfg1, db1, "peer1")
+	syncEngine1, err := sync.NewEngineWithMessenger(cfg1, db1, "peer1", messenger1)
 	if err != nil {
 		t.Fatalf("Failed to create peer1 sync engine: %v", err)
 	}
 
-	syncEngine2, err := sync.NewEngine(cfg2, db2, "peer2")
+	syncEngine2, err := sync.NewEngineWithMessenger(cfg2, db2, "peer2", messenger2)
 	if err != nil {
 		t.Fatalf("Failed to create peer2 sync engine: %v", err)
 	}
 
+	// Register engines with messengers (each messenger needs both engines)
+	messenger1.RegisterEngine("peer1", syncEngine1) // Source engine
+	messenger1.RegisterEngine("peer2", syncEngine2) // Target engine
+	messenger2.RegisterEngine("peer2", syncEngine2) // Source engine
+	messenger2.RegisterEngine("peer1", syncEngine1) // Target engine
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Start components
-	if err := transport1.Start(); err != nil {
-		t.Fatalf("Failed to start transport1: %v", err)
-	}
-	defer transport1.Stop()
-
-	if err := transport2.Start(); err != nil {
-		t.Fatalf("Failed to start transport2: %v", err)
-	}
-	defer transport2.Stop()
-
+	// Start sync engines
 	if err := syncEngine1.Start(ctx); err != nil {
 		t.Fatalf("Failed to start peer1 sync engine: %v", err)
 	}
@@ -906,7 +905,11 @@ func TestEncryptedFileSync(t *testing.T) {
 	}
 	defer syncEngine2.Stop()
 
-	time.Sleep(5 * time.Second)
+	// Wait for watchers to initialize
+	time.Sleep(2 * time.Second)
+
+	waiter := NewEventDrivenWaiterWithTimeout(20 * time.Second)
+	defer waiter.Close()
 
 	// Create a large compressible file that will be compressed and encrypted
 	largeFile := filepath.Join(peer1Dir, "compress_encrypt_test.txt")
@@ -919,21 +922,21 @@ func TestEncryptedFileSync(t *testing.T) {
 		t.Fatalf("Failed to create large test file: %v", err)
 	}
 
-	// Wait for sync
-	time.Sleep(15 * time.Second)
+	// Wait for sync using waiter
+	if err := waiter.WaitForFileSync(peer2Dir, "compress_encrypt_test.txt"); err != nil {
+		t.Fatalf("Compressed+encrypted file sync failed: %v", err)
+	}
 
-	// Verify file synced and content is correct
+	// Verify file content is correct
 	peer2File := filepath.Join(peer2Dir, "compress_encrypt_test.txt")
-	if _, err := os.Stat(peer2File); os.IsNotExist(err) {
-		t.Error("FAILURE: Compressed+encrypted file did not sync")
+	peer2Content, err := os.ReadFile(peer2File)
+	if err != nil {
+		t.Fatalf("Failed to read compressed file on peer2: %v", err)
+	}
+
+	if !bytes.Equal(peer2Content, largeContent) {
+		t.Error("FAILURE: Compressed+encrypted file content corrupted")
 	} else {
-		peer2Content, err := os.ReadFile(peer2File)
-		if err != nil {
-			t.Errorf("Failed to read compressed file on peer2: %v", err)
-		} else if !bytes.Equal(peer2Content, largeContent) {
-			t.Error("FAILURE: Compressed+encrypted file content corrupted")
-		} else {
-			t.Log("SUCCESS: Compressed and encrypted file sync working")
-		}
+		t.Log("SUCCESS: Compressed and encrypted file sync working")
 	}
 }

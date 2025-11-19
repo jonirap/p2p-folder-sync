@@ -41,6 +41,12 @@ func NewDB(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
+	// Ensure database file has proper permissions (readable/writable by owner and group)
+	if err := os.Chmod(dbPath, 0644); err != nil {
+		// Log warning but don't fail - permissions might not be critical in all environments
+		fmt.Printf("Warning: failed to set database file permissions: %v\n", err)
+	}
+
 	return database, nil
 }
 

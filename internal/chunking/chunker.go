@@ -9,13 +9,14 @@ import (
 
 // Chunk represents a file chunk
 type Chunk struct {
-	FileID    string
-	ChunkID   int
-	Offset    int64
-	Length    int64
-	Data      []byte
-	Hash      string
-	IsLast    bool
+	FileID      string
+	ChunkID     int
+	Offset      int64
+	Length      int64
+	Data        []byte
+	Hash        string
+	FileHash    string // Full file hash (for verification after assembly)
+	IsLast      bool
 	TotalChunks int
 }
 

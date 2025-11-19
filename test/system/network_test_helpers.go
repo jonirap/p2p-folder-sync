@@ -2,6 +2,7 @@ package system
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -175,17 +176,35 @@ func (nth *NetworkTestHelper) ConnectPeers(peers []*NetworkPeerSetup) error {
 			peer1.Config.Network.Peers = append(peer1.Config.Network.Peers,
 				fmt.Sprintf("localhost:%d", peer2.Config.Network.Port))
 
+			// Generate a shared session key for both peers
+			// In a real implementation, this would be done through key exchange
+			sharedSessionKey := make([]byte, 32)
+			if _, err := rand.Read(sharedSessionKey); err != nil {
+				return fmt.Errorf("failed to generate shared session key: %w", err)
+			}
+
 			// Initiate connection from peer1 to peer2
 			if err := peer1.Messenger.ConnectToPeer(peer2.ID, "localhost", peer2.Config.Network.Port); err != nil {
 				return fmt.Errorf("failed to connect peer %s to %s: %w", peer1.ID, peer2.ID, err)
 			}
 
-			// For test purposes, also register the connection on peer2's side
-			// In a real network, this would happen through incoming connection handling
+			// Set the session key for outgoing communication
+			if err := peer1.ConnManager.SetSessionKey(peer2.ID, sharedSessionKey); err != nil {
+				return fmt.Errorf("failed to set shared session key for peer %s: %w", peer1.ID, err)
+			}
+
+			// For test purposes, simulate the bidirectional connection
+			// The incoming connection will be registered by TCPTransport.handleConnection()
+			// when peer2 receives the connection, but we need to set up peer2's side too
 			peer2.ConnManager.AddConnection(peer1.ID, "localhost", peer1.Config.Network.Port)
 			peer2.ConnManager.UpdateConnectionState(peer1.ID, connection.StateConnected)
 
-			// Wait for connection to be established
+			// Set the same shared session key for peer2 to communicate back to peer1
+			if err := peer2.ConnManager.SetSessionKey(peer1.ID, sharedSessionKey); err != nil {
+				return fmt.Errorf("failed to set shared session key for peer %s: %w", peer2.ID, err)
+			}
+
+			// Wait for connection to be established (both directions)
 			if err := nth.waitForConnection(peer1, peer2, 10*time.Second); err != nil {
 				return fmt.Errorf("failed to establish connection between peer %s and %s: %w", peer1.ID, peer2.ID, err)
 			}
@@ -232,12 +251,25 @@ func (nth *NetworkTestHelper) waitForConnection(peer1, peer2 *NetworkPeerSetup, 
 type NetworkOperationMonitoringMessenger struct {
 	innerMessenger syncpkg.Messenger
 	monitor        *NetworkOperationMonitor
+	peer1Waiter    *SyncOperationWaiter
+	peer2Waiter    *SyncOperationWaiter
 }
 
 func NewNetworkOperationMonitoringMessenger(inner syncpkg.Messenger, monitor *NetworkOperationMonitor) *NetworkOperationMonitoringMessenger {
 	return &NetworkOperationMonitoringMessenger{
 		innerMessenger: inner,
 		monitor:        monitor,
+		peer1Waiter:    nil,
+		peer2Waiter:    nil,
+	}
+}
+
+func NewNetworkOperationMonitoringMessengerWithWaiters(inner syncpkg.Messenger, monitor *NetworkOperationMonitor, peer1Waiter, peer2Waiter *SyncOperationWaiter) *NetworkOperationMonitoringMessenger {
+	return &NetworkOperationMonitoringMessenger{
+		innerMessenger: inner,
+		monitor:        monitor,
+		peer1Waiter:    peer1Waiter,
+		peer2Waiter:    peer2Waiter,
 	}
 }
 
@@ -248,6 +280,14 @@ func (nomm *NetworkOperationMonitoringMessenger) SendFile(peerID string, fileDat
 func (nomm *NetworkOperationMonitoringMessenger) BroadcastOperation(op *syncpkg.SyncOperation) error {
 	// Notify the monitor
 	nomm.monitor.OnOperationQueued(op)
+
+	// Notify the appropriate waiter based on the sender
+	if op.PeerID == "peer1" && nomm.peer1Waiter != nil {
+		nomm.peer1Waiter.OnOperationQueued(op)
+	} else if op.PeerID == "peer2" && nomm.peer2Waiter != nil {
+		nomm.peer2Waiter.OnOperationQueued(op)
+	}
+
 	return nomm.innerMessenger.BroadcastOperation(op)
 }
 
@@ -417,18 +457,55 @@ func WaitForPeerConnections(peers []*NetworkPeerSetup, timeout time.Duration) er
 
 	expectedConnections := len(peers) * (len(peers) - 1) // Each peer connects to all others
 
+	// Log initial state
+	fmt.Printf("Waiting for %d total connections across %d peers (expected: %d connections per peer)\n",
+		expectedConnections, len(peers), len(peers)-1)
+
+	startTime := time.Now()
+	attemptCount := 0
+
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timeout waiting for peer connections")
+			// Provide detailed diagnostic information on timeout
+			fmt.Printf("TIMEOUT: Failed to establish connections after %v\n", time.Since(startTime))
+
+			// Print detailed connection status for each peer
+			for _, peer := range peers {
+				connections := peer.ConnManager.GetConnectedPeers()
+				fmt.Printf("Peer %s: %d/%d connections (%v)\n",
+					peer.ID, len(connections), len(peers)-1, connections)
+
+				// Print all connection states for debugging
+				allConns := peer.ConnManager.GetAllConnections()
+				for _, conn := range allConns {
+					fmt.Printf("  Connection to %s: %s\n", conn.PeerID, conn.State)
+				}
+			}
+
+			return fmt.Errorf("timeout waiting for peer connections after %d attempts", attemptCount)
 		case <-ticker.C:
+			attemptCount++
 			actualConnections := 0
+			totalConnectedPeers := 0
+
 			for _, peer := range peers {
 				connections := peer.ConnManager.GetConnectedPeers()
 				actualConnections += len(connections)
+				if len(connections) > 0 {
+					totalConnectedPeers++
+				}
+			}
+
+			// Log progress every 5 attempts (1 second)
+			if attemptCount%5 == 0 {
+				fmt.Printf("Attempt %d: %d/%d total connections, %d/%d peers have connections\n",
+					attemptCount, actualConnections, expectedConnections, totalConnectedPeers, len(peers))
 			}
 
 			if actualConnections >= expectedConnections {
+				fmt.Printf("SUCCESS: All connections established after %v (%d attempts)\n",
+					time.Since(startTime), attemptCount)
 				return nil // All peers are connected
 			}
 		}

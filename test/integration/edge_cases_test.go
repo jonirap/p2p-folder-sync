@@ -15,6 +15,9 @@ func TestEdgeCases(t *testing.T) {
 		t.Skip("Skipping edge cases test in short mode")
 	}
 
+	// Clean up any stale Docker resources from previous test runs
+	cleanupStaleDockerResources(t)
+
 	projectName := fmt.Sprintf("p2p-edge-%d", time.Now().Unix())
 
 	testDir := t.TempDir()

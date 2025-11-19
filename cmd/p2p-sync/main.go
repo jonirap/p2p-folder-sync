@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -30,8 +31,16 @@ func main() {
 	var configPath = flag.String("config", "", "Path to configuration file")
 	flag.Parse()
 
+	// Check environment variable if flag not provided
+	configPathStr := *configPath
+	if configPathStr == "" {
+		if envPath := os.Getenv("P2P_CONFIG_PATH"); envPath != "" {
+			configPathStr = envPath
+		}
+	}
+
 	// Load configuration
-	cfg, err := config.LoadConfig(*configPath)
+	cfg, err := config.LoadConfig(configPathStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
 		os.Exit(1)
@@ -136,6 +145,16 @@ func main() {
 		logger.Fatal("Failed to create network transport", zap.Error(err))
 	}
 
+	// Set connection manager on transport
+	if setter, ok := networkTransport.(interface{ SetConnectionManager(*connection.ConnectionManager) }); ok {
+		setter.SetConnectionManager(connManager)
+	}
+
+	// Set peer ID on transport for session key derivation
+	if peerIDSetter, ok := networkTransport.(interface{ SetPeerID(string) }); ok {
+		peerIDSetter.SetPeerID(peerID)
+	}
+
 	// Try to start the transport
 	if err := networkTransport.Start(); err != nil {
 		logger.Warn("Failed to start primary transport, attempting fallback",
@@ -147,6 +166,14 @@ func main() {
 			networkTransport, err = transportFactory.NewTransport("tcp", cfg.Network.Port)
 			if err != nil {
 				logger.Fatal("Failed to create TCP fallback transport", zap.Error(err))
+			}
+			// Set connection manager on fallback transport
+			if setter, ok := networkTransport.(interface{ SetConnectionManager(*connection.ConnectionManager) }); ok {
+				setter.SetConnectionManager(connManager)
+			}
+			// Set peer ID on fallback transport
+			if peerIDSetter, ok := networkTransport.(interface{ SetPeerID(string) }); ok {
+				peerIDSetter.SetPeerID(peerID)
 			}
 			if err := networkTransport.Start(); err != nil {
 				logger.Fatal("Failed to start TCP fallback transport", zap.Error(err))
@@ -203,6 +230,65 @@ func main() {
 	}
 	logger.Info("Sync engine started", zap.String("folder", cfg.Sync.FolderPath))
 
+	// Connect to configured peers
+	peersEnv := os.Getenv("PEERS")
+	var peersList []string
+
+	if peersEnv != "" {
+		// Parse PEERS environment variable (format: "peer-beta:8080,peer-gamma:8080")
+		peersList = splitAndTrim(peersEnv, ",")
+	} else if len(cfg.Network.Peers) > 0 {
+		// Use peers from config
+		peersList = cfg.Network.Peers
+	}
+
+	if len(peersList) > 0 {
+		logger.Info("Connecting to configured peers", zap.Int("count", len(peersList)))
+
+		// Give peers a moment to start up before attempting connections
+		time.Sleep(2 * time.Second)
+
+		for _, peerAddr := range peersList {
+			// Parse peer address (format: "hostname:port" or "peerid:hostname:port")
+			parts := splitAndTrim(peerAddr, ":")
+			if len(parts) >= 2 {
+				hostname := parts[0]
+				port := 8080 // default
+				peerIDForConn := hostname // use hostname as peer ID if not specified
+
+				// Parse port
+				if len(parts) == 2 {
+					fmt.Sscanf(parts[1], "%d", &port)
+				} else if len(parts) == 3 {
+					// Format is peerid:hostname:port
+					peerIDForConn = parts[0]
+					hostname = parts[1]
+					fmt.Sscanf(parts[2], "%d", &port)
+				}
+
+				logger.Info("Connecting to peer",
+					zap.String("peer_id", peerIDForConn),
+					zap.String("address", hostname),
+					zap.Int("port", port))
+
+				go func(pid, addr string, p int) {
+					if err := networkTransport.ConnectToPeer(pid, addr, p); err != nil {
+						logger.Warn("Failed to connect to peer",
+							zap.String("peer_id", pid),
+							zap.String("address", addr),
+							zap.Int("port", p),
+							zap.Error(err))
+					} else {
+						logger.Info("Successfully connected to peer",
+							zap.String("peer_id", pid),
+							zap.String("address", addr),
+							zap.Int("port", p))
+					}
+				}(peerIDForConn, hostname, port)
+			}
+		}
+	}
+
 	logger.Info("P2P Folder Sync initialized successfully")
 
 	// Wait for shutdown signal
@@ -245,4 +331,16 @@ func generatePeerID() string {
 
 	timestamp := time.Now().UnixNano()
 	return fmt.Sprintf("%s-%d", hostname, timestamp)
+}
+
+// splitAndTrim splits a string by delimiter and trims whitespace from each part
+func splitAndTrim(s, delim string) []string {
+	parts := []string{}
+	for _, part := range strings.Split(s, delim) {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return parts
 }

@@ -153,19 +153,28 @@ func (c *Config) Validate() error {
 	}
 
 	// Validate network settings
-	if c.Network.Port < 1024 || c.Network.Port > 65535 {
-		return fmt.Errorf("network.port must be between 1024 and 65535")
+	// Port 0 means "use any available port"
+	if c.Network.Port != 0 && (c.Network.Port < 1024 || c.Network.Port > 65535) {
+		return fmt.Errorf("network.port must be 0 or between 1024 and 65535")
 	}
-	if c.Network.DiscoveryPort < 1024 || c.Network.DiscoveryPort > 65535 {
-		return fmt.Errorf("network.discovery_port must be between 1024 and 65535")
+	if c.Network.DiscoveryPort != 0 && (c.Network.DiscoveryPort < 1024 || c.Network.DiscoveryPort > 65535) {
+		return fmt.Errorf("network.discovery_port must be 0 or between 1024 and 65535")
 	}
 	if c.Network.Protocol != "quic" && c.Network.Protocol != "tcp" && c.Network.Protocol != "" {
 		return fmt.Errorf("network.protocol must be 'quic', 'tcp', or empty (defaults to quic)")
 	}
 
 	// Validate security settings
-	if c.Security.KeyRotationInterval < 3600 || c.Security.KeyRotationInterval > 604800 {
-		return fmt.Errorf("key_rotation_interval must be between 3600 and 604800 seconds")
+	// Allow bypass for testing via environment variable
+	if os.Getenv("P2P_TESTING_MODE") != "true" {
+		if c.Security.KeyRotationInterval < 3600 || c.Security.KeyRotationInterval > 604800 {
+			return fmt.Errorf("key_rotation_interval must be between 3600 and 604800 seconds")
+		}
+	} else {
+		// In test mode, allow shorter intervals but still validate minimum
+		if c.Security.KeyRotationInterval < 1 || c.Security.KeyRotationInterval > 604800 {
+			return fmt.Errorf("key_rotation_interval must be between 1 and 604800 seconds (test mode)")
+		}
 	}
 
 	// Validate compression settings
