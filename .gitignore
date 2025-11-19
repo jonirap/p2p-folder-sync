@@ -37,6 +37,7 @@ sync-data*/
 *.db-wal
 keychain.db
 .p2p-sync-tmp-*
+/p2p-sync
 
 # Logs
 *.log
