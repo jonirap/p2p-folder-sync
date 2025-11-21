@@ -1,0 +1,283 @@
+run:
+  timeout: 5m
+  tests: true
+  build-tags:
+    - integration
+  skip-dirs:
+    - vendor
+    - third_party
+  skip-files:
+    - ".*\\.pb\\.go$"
+    - ".*_gen\\.go$"
+  modules-download-mode: readonly
+
+output:
+  format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+  uniq-by-line: true
+  sort-results: true
+
+linters:
+  enable:
+    # Default linters
+    - errcheck      # Check for unchecked errors
+    - gosimple      # Simplify code
+    - govet         # Vet examines Go source code
+    - ineffassign   # Detect ineffectual assignments
+    - staticcheck   # Static analysis
+    - typecheck     # Type-check code
+    - unused        # Check for unused code
+
+    # Additional recommended linters
+    - bodyclose     # Check HTTP response body is closed
+    - cyclop        # Check cyclomatic complexity
+    - dupl          # Check for code duplication
+    - durationcheck # Check time.Duration usage
+    - errorlint     # Check error wrapping
+    - exhaustive    # Check exhaustiveness of enum switch statements
+    - exportloopref # Check for exported loop variables
+    - gochecknoinits # Check for init functions
+    - goconst       # Find repeated strings that could be constants
+    - gocritic      # The most opinionated Go linter
+    - gocyclo       # Check cyclomatic complexity
+    - godot         # Check comments end in period
+    - gofmt         # Check formatting
+    - goimports     # Check import grouping and ordering
+    - gomnd         # Detect magic numbers
+    - gosec         # Security checks
+    - misspell      # Check for commonly misspelled words
+    - nakedret      # Check naked returns in long functions
+    - nilerr        # Check returning nil even if error is not nil
+    - nolintlint    # Check nolint directives
+    - predeclared   # Check for shadowing predeclared identifiers
+    - revive        # Fast, configurable, extensible linter
+    - rowserrcheck  # Check SQL rows.Err
+    - sqlclosecheck # Check SQL DB/rows/stmt close
+    - stylecheck    # Replacement for golint
+    - tparallel     # Detect inappropriate t.Parallel() usage
+    - unconvert     # Remove unnecessary type conversions
+    - unparam       # Check for unused function parameters
+    - whitespace    # Check for extra whitespace
+
+  disable:
+    - funlen        # Too strict for test functions
+    - gochecknoglobals # We use some globals appropriately
+    - gocognit      # Similar to gocyclo
+    - godox         # We allow TODO/FIXME comments
+    - goerr113      # Too strict for wrapping errors
+    - lll           # Line length - we handle this in review
+    - nlreturn      # Too opinionated about returns
+    - wrapcheck     # Too many false positives
+    - wsl           # Too opinionated about whitespace
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+    exclude-functions:
+      - (io.Closer).Close
+      - (*database/sql.Rows).Close
+      - (*database/sql.Stmt).Close
+
+  govet:
+    check-shadowing: true
+    enable-all: true
+    disable:
+      - fieldalignment  # Too strict, impacts readability
+
+  gocyclo:
+    min-complexity: 15
+
+  cyclop:
+    max-complexity: 15
+    skip-tests: true
+
+  dupl:
+    threshold: 100
+
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+    ignore-tests: true
+
+  gomnd:
+    settings:
+      mnd:
+        checks:
+          - argument
+          - case
+          - condition
+          - operation
+          - return
+          - assign
+        ignored-numbers:
+          - '0'
+          - '1'
+          - '2'
+          - '8'
+          - '16'
+          - '32'
+          - '64'
+          - '100'
+          - '128'
+          - '256'
+          - '512'
+          - '1024'
+        ignored-functions:
+          - 'time.After'
+          - 'time.Sleep'
+          - 'time.NewTicker'
+          - 'context.WithTimeout'
+          - 'context.WithDeadline'
+
+  gosec:
+    severity: medium
+    confidence: medium
+    excludes:
+      - G104  # Audit errors not checked (covered by errcheck)
+      - G304  # File path from variable (too many false positives)
+    config:
+      G301: "0644"
+      G302: "0600"
+      G306: "0644"
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+      - experimental
+      - opinionated
+    disabled-checks:
+      - whyNoLint
+      - unnamedResult
+      - hugeParam
+
+  misspell:
+    locale: US
+    ignore-words:
+      - cancelled
+
+  nakedret:
+    max-func-lines: 30
+
+  revive:
+    confidence: 0.8
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: if-return
+      - name: increment-decrement
+      - name: var-naming
+      - name: var-declaration
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+      - name: empty-block
+      - name: superfluous-else
+      - name: unused-parameter
+      - name: unreachable-code
+      - name: redefines-builtin-id
+
+  stylecheck:
+    checks: ["all", "-ST1000", "-ST1003"]
+    dot-import-whitelist:
+      - github.com/onsi/ginkgo
+      - github.com/onsi/gomega
+    http-status-code-whitelist:
+      - "200"
+      - "400"
+      - "404"
+      - "500"
+
+  whitespace:
+    multi-if: false
+    multi-func: false
+
+  unparam:
+    check-exported: false
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+  exclude-rules:
+    # Exclude some linters from running on tests files
+    - path: _test\.go
+      linters:
+        - gocyclo
+        - errcheck
+        - dupl
+        - gosec
+        - goconst
+        - cyclop
+        - gomnd
+
+    # Exclude test helpers from some checks
+    - path: test/
+      linters:
+        - errcheck
+        - goconst
+        - gomnd
+        - dupl
+
+    # Exclude main.go from some checks
+    - path: cmd/p2p-sync/main\.go
+      linters:
+        - gochecknoinits
+        - gocyclo
+
+    # Allow long functions in generated code
+    - path: ".*\\.pb\\.go"
+      linters:
+        - all
+
+    # Exclude known false positives
+    - text: "ST1000: at least one file in a package should have a package comment"
+      linters:
+        - stylecheck
+
+    # Exclude shadow checking on the variable named err
+    - text: 'shadow: declaration of "err"'
+      linters:
+        - govet
+
+    # Exclude shadow checking on the variable named ctx
+    - text: 'shadow: declaration of "ctx"'
+      linters:
+        - govet
+
+    # Exclude some staticcheck checks
+    - text: "SA9003:"
+      linters:
+        - staticcheck
+
+    # Exclude linters for struct literal initialization
+    - text: "composite literal uses unkeyed fields"
+      linters:
+        - govet
+
+  exclude-use-default: false
+
+  # Show all issues from a new linter
+  new-from-rev: ""
+
+severity:
+  default-severity: warning
+  rules:
+    - linters:
+        - errcheck
+        - govet
+        - staticcheck
+      severity: error

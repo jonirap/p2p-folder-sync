@@ -1,0 +1,171 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Run tests
+        run: make test
+        env:
+          P2P_TESTING_MODE: "true"
+
+      - name: Build release binaries
+        run: |
+          # Linux amd64
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+            go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o bin/p2p-sync-linux-amd64 ./cmd/p2p-sync
+
+          # Linux arm64
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+            go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o bin/p2p-sync-linux-arm64 ./cmd/p2p-sync
+
+          # macOS amd64
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 \
+            go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o bin/p2p-sync-darwin-amd64 ./cmd/p2p-sync
+
+          # macOS arm64 (M1/M2)
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
+            go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o bin/p2p-sync-darwin-arm64 ./cmd/p2p-sync
+
+          # Windows amd64
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+            go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o bin/p2p-sync-windows-amd64.exe ./cmd/p2p-sync
+
+      - name: Create checksums
+        run: |
+          cd bin
+          sha256sum p2p-sync-* > checksums.txt
+          cat checksums.txt
+
+      - name: Create release notes
+        id: release_notes
+        run: |
+          # Extract version from tag
+          VERSION=${{ github.ref_name }}
+
+          # Generate release notes
+          cat > release-notes.md << EOF
+          # P2P Folder Sync ${VERSION}
+
+          ## Downloads
+
+          Download the appropriate binary for your platform:
+
+          - **Linux (amd64)**: p2p-sync-linux-amd64
+          - **Linux (arm64)**: p2p-sync-linux-arm64
+          - **macOS (Intel)**: p2p-sync-darwin-amd64
+          - **macOS (Apple Silicon)**: p2p-sync-darwin-arm64
+          - **Windows (amd64)**: p2p-sync-windows-amd64.exe
+
+          ## Installation
+
+          \`\`\`bash
+          # Linux/macOS
+          chmod +x p2p-sync-*
+          sudo mv p2p-sync-* /usr/local/bin/p2p-sync
+
+          # Verify installation
+          p2p-sync --version
+          \`\`\`
+
+          ## Verify Checksums
+
+          \`\`\`bash
+          sha256sum -c checksums.txt
+          \`\`\`
+
+          ## Changes
+
+          See CHANGELOG.md for detailed changes in this release.
+
+          ## Docker
+
+          Docker images available at:
+          \`\`\`bash
+          docker pull ghcr.io/yourusername/p2p-sync:${VERSION}
+          docker pull ghcr.io/yourusername/p2p-sync:latest
+          \`\`\`
+          EOF
+
+          cat release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            bin/p2p-sync-linux-amd64
+            bin/p2p-sync-linux-arm64
+            bin/p2p-sync-darwin-amd64
+            bin/p2p-sync-darwin-arm64
+            bin/p2p-sync-windows-amd64.exe
+            bin/checksums.txt
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker-release:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
