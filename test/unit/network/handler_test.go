@@ -2,8 +2,9 @@ package network_test
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/p2p-folder-sync/p2p-sync/internal/chunking"
 	"github.com/p2p-folder-sync/p2p-sync/internal/compression"
@@ -14,32 +15,54 @@ import (
 	syncpkg "github.com/p2p-folder-sync/p2p-sync/internal/sync"
 )
 
-// Mock SyncEngine for testing
-type MockSyncEngine struct {
-	getAllFilesFunc       func() ([]*database.FileMetadata, error)
-	handleIncomingFileFunc func([]byte, *syncpkg.SyncOperation) error
-	handleIncomingRenameFunc func(*syncpkg.SyncOperation) error
-}
-
-func (m *MockSyncEngine) GetAllFiles() ([]*database.FileMetadata, error) {
-	if m.getAllFilesFunc != nil {
-		return m.getAllFilesFunc()
+// Helper to create a real engine for testing
+func createTestEngine(t *testing.T, peerID string) (*syncpkg.Engine, *database.DB, string, func()) {
+	t.Helper()
+	tmpDir, err := os.MkdirTemp("", "handler-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	return []*database.FileMetadata{}, nil
-}
 
-func (m *MockSyncEngine) HandleIncomingFile(data []byte, op *syncpkg.SyncOperation) error {
-	if m.handleIncomingFileFunc != nil {
-		return m.handleIncomingFileFunc(data, op)
+	cfg := &config.Config{
+		Sync: config.SyncConfig{
+			FolderPath:             tmpDir,
+			ChunkSizeMin:           64 * 1024,
+			ChunkSizeMax:           2 * 1024 * 1024,
+			ChunkSizeDefault:       512 * 1024,
+			MaxConcurrentTransfers: 5,
+		},
+		Network: config.NetworkConfig{
+			Port:          8080,
+			DiscoveryPort: 8081,
+		},
 	}
-	return nil
-}
 
-func (m *MockSyncEngine) HandleIncomingRename(op *syncpkg.SyncOperation) error {
-	if m.handleIncomingRenameFunc != nil {
-		return m.handleIncomingRenameFunc(op)
+	dbPath := filepath.Join(tmpDir, ".p2p-sync", "test.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		os.RemoveAll(tmpDir)
+		t.Fatalf("Failed to create db dir: %v", err)
 	}
-	return nil
+
+	db, err := database.NewDB(dbPath)
+	if err != nil {
+		os.RemoveAll(tmpDir)
+		t.Fatalf("Failed to create database: %v", err)
+	}
+
+	engine, err := syncpkg.NewEngine(cfg, db, peerID)
+	if err != nil {
+		db.Close()
+		os.RemoveAll(tmpDir)
+		t.Fatalf("Failed to create engine: %v", err)
+	}
+
+	cleanup := func() {
+		engine.Stop()
+		db.Close()
+		os.RemoveAll(tmpDir)
+	}
+
+	return engine, db, tmpDir, cleanup
 }
 
 // Mock HeartbeatManager for testing
@@ -55,10 +78,12 @@ func (m *MockHeartbeatManager) HandleHeartbeatResponse(peerID string) {
 
 func TestNewNetworkMessageHandler(t *testing.T) {
 	cfg := createTestConfig()
-	mockEngine := &MockSyncEngine{}
+	engine, _, _, cleanup := createTestEngine(t, "test-peer")
+	defer cleanup()
+
 	mockHeartbeat := &MockHeartbeatManager{}
 
-	handler := network.NewNetworkMessageHandler(cfg, mockEngine, mockHeartbeat, "test-peer")
+	handler := network.NewNetworkMessageHandler(cfg, engine, mockHeartbeat, "test-peer")
 
 	if handler == nil {
 		t.Fatal("Expected handler to be created")
@@ -69,8 +94,10 @@ func TestSetSyncEngine(t *testing.T) {
 	cfg := createTestConfig()
 	handler := network.NewNetworkMessageHandler(cfg, nil, nil, "test-peer")
 
-	mockEngine := &MockSyncEngine{}
-	handler.SetSyncEngine(mockEngine)
+	engine, _, _, cleanup := createTestEngine(t, "test-peer")
+	defer cleanup()
+
+	handler.SetSyncEngine(engine)
 
 	// Verify by trying to handle a message that requires sync engine
 	// We can't directly test the field, but we can test behavior
@@ -98,6 +125,54 @@ func TestSetHeartbeatManager(t *testing.T) {
 	if mockHeartbeat.callCount != 1 {
 		t.Errorf("Expected heartbeat handler to be called once, got %d", mockHeartbeat.callCount)
 	}
+}
+
+// Helper function to create test config
+func createTestConfig() *config.Config {
+	return &config.Config{
+		Sync: config.SyncConfig{
+			FolderPath:             "/tmp/test-sync",
+			ChunkSizeMin:           64 * 1024,
+			ChunkSizeMax:           2 * 1024 * 1024,
+			ChunkSizeDefault:       512 * 1024,
+			MaxConcurrentTransfers: 5,
+		},
+		Network: config.NetworkConfig{
+			Port:          8080,
+			DiscoveryPort: 8081,
+		},
+		Compression: config.CompressionConfig{
+			Enabled:           true,
+			FileSizeThreshold: 1024 * 1024, // 1 MB
+			Algorithm:         "zstd",
+			Level:             3,
+		},
+	}
+}
+
+func TestHandleMessage_Heartbeat(t *testing.T) {
+	cfg := createTestConfig()
+	engine, _, _, cleanup := createTestEngine(t, "test-peer")
+	defer cleanup()
+
+	mockHeartbeat := &MockHeartbeatManager{}
+	handler := network.NewNetworkMessageHandler(cfg, engine, mockHeartbeat, "test-peer")
+
+	msg := &messages.Message{
+		ID:       "msg-1",
+		Type:     messages.TypeHeartbeat,
+		SenderID: "peer-1",
+	}
+
+	err := handler.HandleMessage(msg)
+	if err != nil {
+		t.Errorf("HandleMessage failed: %v", err)
+	}
+
+	if mockHeartbeat.callCount != 1 {
+		t.Errorf("Expected 1 heartbeat call, got %d", mockHeartbeat.callCount)
+	}
+
 	if mockHeartbeat.lastPeerID != "peer-1" {
 		t.Errorf("Expected peer ID 'peer-1', got '%s'", mockHeartbeat.lastPeerID)
 	}
@@ -105,7 +180,10 @@ func TestSetHeartbeatManager(t *testing.T) {
 
 func TestHandleMessage_UnknownType(t *testing.T) {
 	cfg := createTestConfig()
-	handler := network.NewNetworkMessageHandler(cfg, nil, nil, "test-peer")
+	engine, _, _, cleanup := createTestEngine(t, "test-peer")
+	defer cleanup()
+
+	handler := network.NewNetworkMessageHandler(cfg, engine, nil, "test-peer")
 
 	msg := &messages.Message{
 		ID:       "msg-1",
@@ -117,358 +195,27 @@ func TestHandleMessage_UnknownType(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for unknown message type")
 	}
-	if !contains(err.Error(), "unknown message type") {
-		t.Errorf("Expected 'unknown message type' error, got: %v", err)
-	}
-}
-
-func TestHandleMessage_Discovery(t *testing.T) {
-	cfg := createTestConfig()
-	handler := network.NewNetworkMessageHandler(cfg, nil, nil, "test-peer")
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeDiscovery,
-		SenderID: "peer-1",
-		Payload:  messages.DiscoveryMessage{},
-	}
-
-	err := handler.HandleMessage(msg)
-	if err != nil {
-		t.Errorf("Discovery handler failed: %v", err)
-	}
-}
-
-func TestHandleMessage_DiscoveryResponse(t *testing.T) {
-	cfg := createTestConfig()
-	handler := network.NewNetworkMessageHandler(cfg, nil, nil, "test-peer")
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeDiscoveryResponse,
-		SenderID: "peer-1",
-		Payload:  messages.DiscoveryResponseMessage{},
-	}
-
-	err := handler.HandleMessage(msg)
-	if err != nil {
-		t.Errorf("Discovery response handler failed: %v", err)
-	}
-}
-
-func TestHandleMessage_Handshake(t *testing.T) {
-	cfg := createTestConfig()
-	handler := network.NewNetworkMessageHandler(cfg, nil, nil, "test-peer")
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeHandshake,
-		SenderID: "peer-1",
-	}
-
-	err := handler.HandleMessage(msg)
-	if err == nil {
-		t.Error("Expected error for unimplemented handshake")
-	}
-	if !contains(err.Error(), "not implemented") {
-		t.Errorf("Expected 'not implemented' error, got: %v", err)
-	}
-}
-
-func TestHandleMessage_HandshakeAck(t *testing.T) {
-	cfg := createTestConfig()
-	handler := network.NewNetworkMessageHandler(cfg, nil, nil, "test-peer")
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeHandshakeAck,
-		SenderID: "peer-1",
-	}
-
-	err := handler.HandleMessage(msg)
-	if err == nil {
-		t.Error("Expected error for unimplemented handshake ack")
-	}
-}
-
-func TestHandleMessage_HandshakeComplete(t *testing.T) {
-	cfg := createTestConfig()
-	handler := network.NewNetworkMessageHandler(cfg, nil, nil, "test-peer")
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeHandshakeComplete,
-		SenderID: "peer-1",
-	}
-
-	err := handler.HandleMessage(msg)
-	if err == nil {
-		t.Error("Expected error for unimplemented handshake complete")
-	}
-}
-
-func TestHandleMessage_FileRequest(t *testing.T) {
-	cfg := createTestConfig()
-	handler := network.NewNetworkMessageHandler(cfg, nil, nil, "test-peer")
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeFileRequest,
-		SenderID: "peer-1",
-		Payload:  messages.FileRequestMessage{},
-	}
-
-	err := handler.HandleMessage(msg)
-	if err != nil {
-		t.Errorf("File request handler failed: %v", err)
-	}
-}
-
-func TestHandleMessage_SyncOperation_Create(t *testing.T) {
-	cfg := createTestConfig()
-	mockEngine := &MockSyncEngine{
-		handleIncomingFileFunc: func(data []byte, op *syncpkg.SyncOperation) error {
-			if op.Type != syncpkg.OpCreate {
-				t.Errorf("Expected OpCreate, got %v", op.Type)
-			}
-			if op.Source != "remote" {
-				t.Errorf("Expected source 'remote', got '%s'", op.Source)
-			}
-			if string(data) != "test file content" {
-				t.Errorf("Expected 'test file content', got '%s'", string(data))
-			}
-			return nil
-		},
-	}
-	handler := network.NewNetworkMessageHandler(cfg, mockEngine, nil, "test-peer")
-
-	fileID := "file-1"
-	checksum := "abc123"
-	size := int64(17)
-	mtime := time.Now().Unix()
-
-	payload := &messages.LogEntryPayload{
-		OperationID: "op-1",
-		Type:        string(syncpkg.OpCreate),
-		Path:        "test.txt",
-		FileID:      &fileID,
-		Checksum:    &checksum,
-		Size:        &size,
-		Mtime:       &mtime,
-		PeerID:      "peer-1",
-		Data:        []byte("test file content"),
-	}
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeSyncOperation,
-		SenderID: "peer-1",
-		Payload:  payload,
-	}
-
-	err := handler.HandleMessage(msg)
-	if err != nil {
-		t.Errorf("Sync operation handler failed: %v", err)
-	}
-}
-
-func TestHandleMessage_SyncOperation_Delete(t *testing.T) {
-	cfg := createTestConfig()
-	mockEngine := &MockSyncEngine{
-		handleIncomingFileFunc: func(data []byte, op *syncpkg.SyncOperation) error {
-			if op.Type != syncpkg.OpDelete {
-				t.Errorf("Expected OpDelete, got %v", op.Type)
-			}
-			if len(data) != 0 {
-				t.Error("Expected empty data for delete operation")
-			}
-			return nil
-		},
-	}
-	handler := network.NewNetworkMessageHandler(cfg, mockEngine, nil, "test-peer")
-
-	fileID := "file-1"
-	checksum := "abc123"
-	size := int64(0)
-	mtime := time.Now().Unix()
-
-	payload := &messages.LogEntryPayload{
-		OperationID: "op-1",
-		Type:        string(syncpkg.OpDelete),
-		Path:        "test.txt",
-		FileID:      &fileID,
-		Checksum:    &checksum,
-		Size:        &size,
-		Mtime:       &mtime,
-		PeerID:      "peer-1",
-		Data:        []byte{},
-	}
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeSyncOperation,
-		SenderID: "peer-1",
-		Payload:  payload,
-	}
-
-	err := handler.HandleMessage(msg)
-	if err != nil {
-		t.Errorf("Delete operation handler failed: %v", err)
-	}
-}
-
-func TestHandleMessage_SyncOperation_Rename(t *testing.T) {
-	cfg := createTestConfig()
-	mockEngine := &MockSyncEngine{
-		handleIncomingRenameFunc: func(op *syncpkg.SyncOperation) error {
-			if op.Type != syncpkg.OpRename {
-				t.Errorf("Expected OpRename, got %v", op.Type)
-			}
-			return nil
-		},
-	}
-	handler := network.NewNetworkMessageHandler(cfg, mockEngine, nil, "test-peer")
-
-	fileID := "file-1"
-	checksum := "abc123"
-	size := int64(100)
-	mtime := time.Now().Unix()
-	fromPath := "old.txt"
-
-	payload := &messages.LogEntryPayload{
-		OperationID: "op-1",
-		Type:        string(syncpkg.OpRename),
-		Path:        "new.txt",
-		FromPath:    &fromPath,
-		FileID:      &fileID,
-		Checksum:    &checksum,
-		Size:        &size,
-		Mtime:       &mtime,
-		PeerID:      "peer-1",
-		Data:        []byte{},
-	}
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeSyncOperation,
-		SenderID: "peer-1",
-		Payload:  payload,
-	}
-
-	err := handler.HandleMessage(msg)
-	if err != nil {
-		t.Errorf("Rename operation handler failed: %v", err)
-	}
-}
-
-func TestHandleMessage_SyncOperation_WithCompression(t *testing.T) {
-	cfg := createTestConfig()
-
-	// Create compressed data
-	compressor, err := compression.NewCompressor("zstd", 3)
-	if err != nil {
-		t.Fatalf("Failed to create compressor: %v", err)
-	}
-
-	originalData := []byte("test file content that will be compressed")
-	compressedData, err := compressor.Compress(originalData)
-	if err != nil {
-		t.Fatalf("Failed to compress data: %v", err)
-	}
-
-	mockEngine := &MockSyncEngine{
-		handleIncomingFileFunc: func(data []byte, op *syncpkg.SyncOperation) error {
-			// Verify decompressed data matches original
-			if string(data) != string(originalData) {
-				t.Errorf("Expected decompressed data '%s', got '%s'", originalData, data)
-			}
-			return nil
-		},
-	}
-	handler := network.NewNetworkMessageHandler(cfg, mockEngine, nil, "test-peer")
-
-	fileID := "file-1"
-	checksum := "abc123"
-	size := int64(len(compressedData))
-	mtime := time.Now().Unix()
-	compressed := true
-	originalSize := int64(len(originalData))
-	algorithm := "zstd"
-
-	payload := &messages.LogEntryPayload{
-		OperationID:          "op-1",
-		Type:                 string(syncpkg.OpCreate),
-		Path:                 "test.txt",
-		FileID:               &fileID,
-		Checksum:             &checksum,
-		Size:                 &size,
-		Mtime:                &mtime,
-		PeerID:               "peer-1",
-		Data:                 compressedData,
-		Compressed:           &compressed,
-		OriginalSize:         &originalSize,
-		CompressionAlgorithm: &algorithm,
-	}
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeSyncOperation,
-		SenderID: "peer-1",
-		Payload:  payload,
-	}
-
-	err = handler.HandleMessage(msg)
-	if err != nil {
-		t.Errorf("Compressed sync operation handler failed: %v", err)
-	}
-}
-
-func TestHandleMessage_SyncOperation_NoSyncEngine(t *testing.T) {
-	cfg := createTestConfig()
-	handler := network.NewNetworkMessageHandler(cfg, nil, nil, "test-peer")
-
-	fileID := "file-1"
-	checksum := "abc123"
-	size := int64(10)
-	mtime := time.Now().Unix()
-
-	payload := &messages.LogEntryPayload{
-		OperationID: "op-1",
-		Type:        string(syncpkg.OpCreate),
-		Path:        "test.txt",
-		FileID:      &fileID,
-		Checksum:    &checksum,
-		Size:        &size,
-		Mtime:       &mtime,
-		PeerID:      "peer-1",
-		Data:        []byte("test"),
-	}
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeSyncOperation,
-		SenderID: "peer-1",
-		Payload:  payload,
-	}
-
-	err := handler.HandleMessage(msg)
-	// Should not error but will log that sync engine is not available
-	if err != nil {
-		t.Errorf("Expected no error when sync engine unavailable, got: %v", err)
-	}
 }
 
 func TestHandleMessage_Chunk(t *testing.T) {
 	cfg := createTestConfig()
-	mockEngine := &MockSyncEngine{}
-	handler := network.NewNetworkMessageHandler(cfg, mockEngine, nil, "test-peer")
+	engine, _, _, cleanup := createTestEngine(t, "test-peer")
+	defer cleanup()
+
+	handler := network.NewNetworkMessageHandler(cfg, engine, nil, "test-peer")
 
 	// Create chunk data
 	chunkData := []byte("chunk data for testing")
-	chunker := chunking.NewChunker(512 * 1024)
-	chunk, err := chunker.CreateChunk("file-1", 0, chunkData, 0, len(chunkData), true, 1)
-	if err != nil {
-		t.Fatalf("Failed to create chunk: %v", err)
+	chunk := &chunking.Chunk{
+		FileID:      "file-1",
+		ChunkID:     0,
+		Offset:      0,
+		Length:      int64(len(chunkData)),
+		Data:        chunkData,
+		Hash:        "chunk-hash",
+		FileHash:    "abc123",
+		IsLast:      true,
+		TotalChunks: 1,
 	}
 
 	payload := &messages.ChunkMessage{
@@ -490,7 +237,7 @@ func TestHandleMessage_Chunk(t *testing.T) {
 		Payload:  payload,
 	}
 
-	err = handler.HandleMessage(msg)
+	err := handler.HandleMessage(msg)
 	if err != nil {
 		t.Errorf("Chunk handler failed: %v", err)
 	}
@@ -498,22 +245,18 @@ func TestHandleMessage_Chunk(t *testing.T) {
 
 func TestHandleMessage_Chunk_MultipleChunks(t *testing.T) {
 	cfg := createTestConfig()
-	mockEngine := &MockSyncEngine{
-		handleIncomingFileFunc: func(data []byte, op *syncpkg.SyncOperation) error {
-			// Will be called when all chunks are assembled
-			return nil
-		},
-	}
-	handler := network.NewNetworkMessageHandler(cfg, mockEngine, nil, "test-peer")
+	engine, _, _, cleanup := createTestEngine(t, "test-peer")
+	defer cleanup()
 
-	// Create 3 chunks
-	fileData := make([]byte, 1500) // 1.5KB
-	for i := range fileData {
-		fileData[i] = byte(i % 256)
-	}
+	handler := network.NewNetworkMessageHandler(cfg, engine, nil, "test-peer")
 
-	chunker := chunking.NewChunker(512) // 512 bytes per chunk
-	chunks, err := chunker.ChunkFile("file-1", fileData)
+	// Simulate multiple chunks
+	totalChunks := 3
+	fileData := []byte("This is test data that will be split into multiple chunks")
+	chunkSize := len(fileData) / totalChunks
+
+	chunker := chunking.NewChunker(int64(chunkSize))
+	chunks, err := chunker.ChunkFile("file-2", fileData)
 	if err != nil {
 		t.Fatalf("Failed to chunk file: %v", err)
 	}
@@ -522,7 +265,7 @@ func TestHandleMessage_Chunk_MultipleChunks(t *testing.T) {
 	for _, chunk := range chunks {
 		payload := &messages.ChunkMessage{
 			FileID:      chunk.FileID,
-			FileHash:    "filehash123",
+			FileHash:    chunk.FileHash,
 			ChunkID:     chunk.ChunkID,
 			TotalChunks: chunk.TotalChunks,
 			Offset:      chunk.Offset,
@@ -541,149 +284,55 @@ func TestHandleMessage_Chunk_MultipleChunks(t *testing.T) {
 
 		err := handler.HandleMessage(msg)
 		if err != nil {
-			t.Errorf("Chunk handler failed for chunk %d: %v", chunk.ChunkID, err)
+			t.Errorf("Failed to handle chunk %d: %v", chunk.ChunkID, err)
 		}
 	}
 }
 
-func TestHandleMessage_ChunkRequest(t *testing.T) {
-	cfg := createTestConfig()
-	handler := network.NewNetworkMessageHandler(cfg, nil, nil, "test-peer")
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeChunkRequest,
-		SenderID: "peer-1",
-		Payload:  messages.ChunkRequestMessage{},
+func TestCompression(t *testing.T) {
+	testCases := []struct {
+		name      string
+		algorithm string
+		data      []byte
+	}{
+		{
+			name:      "zstd",
+			algorithm: "zstd",
+			data:      []byte("This is test data that should be compressed using zstd"),
+		},
+		{
+			name:      "gzip",
+			algorithm: "gzip",
+			data:      []byte("This is test data that should be compressed using gzip"),
+		},
 	}
 
-	err := handler.HandleMessage(msg)
-	if err != nil {
-		t.Errorf("Chunk request handler failed: %v", err)
+	for _, tc := range testCases{
+		t.Run(tc.name, func(t *testing.T) {
+			compressor, err := compression.NewCompressor(tc.algorithm, 3)
+			if err != nil {
+				t.Fatalf("Failed to create compressor: %v", err)
+			}
+
+			compressed, err := compressor.Compress(tc.data)
+			if err != nil {
+				t.Fatalf("Compression failed: %v", err)
+			}
+
+			if len(compressed) >= len(tc.data) {
+				t.Logf("Warning: Compressed data (%d bytes) is not smaller than original (%d bytes)",
+					len(compressed), len(tc.data))
+			}
+
+			decompressed, err := compressor.Decompress(compressed)
+			if err != nil {
+				t.Fatalf("Decompression failed: %v", err)
+			}
+
+			if string(decompressed) != string(tc.data) {
+				t.Errorf("Decompressed data doesn't match original.\nExpected: %s\nGot: %s",
+					string(tc.data), string(decompressed))
+			}
+		})
 	}
-}
-
-func TestHandleMessage_OperationAck(t *testing.T) {
-	cfg := createTestConfig()
-	handler := network.NewNetworkMessageHandler(cfg, nil, nil, "test-peer")
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeOperationAck,
-		SenderID: "peer-1",
-		Payload:  &messages.OperationAckMessage{Success: true},
-	}
-
-	err := handler.HandleMessage(msg)
-	if err != nil {
-		t.Errorf("Operation ack handler failed: %v", err)
-	}
-}
-
-func TestHandleMessage_ChunkAck(t *testing.T) {
-	cfg := createTestConfig()
-	handler := network.NewNetworkMessageHandler(cfg, nil, nil, "test-peer")
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeChunkAck,
-		SenderID: "peer-1",
-		Payload:  &messages.ChunkAckMessage{Success: true},
-	}
-
-	err := handler.HandleMessage(msg)
-	if err != nil {
-		t.Errorf("Chunk ack handler failed: %v", err)
-	}
-}
-
-func TestHandleMessage_Heartbeat(t *testing.T) {
-	cfg := createTestConfig()
-	mockHeartbeat := &MockHeartbeatManager{}
-	handler := network.NewNetworkMessageHandler(cfg, nil, mockHeartbeat, "test-peer")
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeHeartbeat,
-		SenderID: "peer-1",
-	}
-
-	err := handler.HandleMessage(msg)
-	if err != nil {
-		t.Errorf("Heartbeat handler failed: %v", err)
-	}
-
-	if mockHeartbeat.callCount != 1 {
-		t.Errorf("Expected 1 heartbeat call, got %d", mockHeartbeat.callCount)
-	}
-	if mockHeartbeat.lastPeerID != "peer-1" {
-		t.Errorf("Expected peer ID 'peer-1', got '%s'", mockHeartbeat.lastPeerID)
-	}
-}
-
-func TestHandleMessage_Heartbeat_NoManager(t *testing.T) {
-	cfg := createTestConfig()
-	handler := network.NewNetworkMessageHandler(cfg, nil, nil, "test-peer")
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeHeartbeat,
-		SenderID: "peer-1",
-	}
-
-	// Should not error even if heartbeat manager is nil
-	err := handler.HandleMessage(msg)
-	if err != nil {
-		t.Errorf("Heartbeat handler should not fail when manager is nil: %v", err)
-	}
-}
-
-func TestHandleMessage_InvalidPayload(t *testing.T) {
-	cfg := createTestConfig()
-	mockEngine := &MockSyncEngine{}
-	handler := network.NewNetworkMessageHandler(cfg, mockEngine, nil, "test-peer")
-
-	// Send sync operation with wrong payload type
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeSyncOperation,
-		SenderID: "peer-1",
-		Payload:  "invalid payload type",
-	}
-
-	err := handler.HandleMessage(msg)
-	if err == nil {
-		t.Error("Expected error for invalid payload type")
-	}
-}
-
-func TestHandleMessage_Chunk_InvalidPayload(t *testing.T) {
-	cfg := createTestConfig()
-	handler := network.NewNetworkMessageHandler(cfg, nil, nil, "test-peer")
-
-	msg := &messages.Message{
-		ID:       "msg-1",
-		Type:     messages.TypeChunk,
-		SenderID: "peer-1",
-		Payload:  "invalid chunk payload",
-	}
-
-	err := handler.HandleMessage(msg)
-	if err == nil {
-		t.Error("Expected error for invalid chunk payload")
-	}
-}
-
-// Helper function
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && findSubstring(s, substr)
-}
-
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

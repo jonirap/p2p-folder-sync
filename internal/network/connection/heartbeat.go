@@ -12,6 +12,7 @@ type HeartbeatManager struct {
 	connManager *ConnectionManager
 	transport   Transport
 	config      *config.Config
+	peerID      string
 	stopCh      chan struct{}
 }
 
@@ -21,11 +22,12 @@ type Transport interface {
 }
 
 // NewHeartbeatManager creates a new heartbeat manager
-func NewHeartbeatManager(connManager *ConnectionManager, transport Transport, cfg *config.Config) *HeartbeatManager {
+func NewHeartbeatManager(connManager *ConnectionManager, transport Transport, cfg *config.Config, peerID string) *HeartbeatManager {
 	return &HeartbeatManager{
 		connManager: connManager,
 		transport:   transport,
 		config:      cfg,
+		peerID:      peerID,
 		stopCh:      make(chan struct{}),
 	}
 }
@@ -81,7 +83,7 @@ func (hm *HeartbeatManager) sendHeartbeatToPeer(peerID string) {
 	// Create heartbeat message
 	heartbeatMsg := messages.NewMessage(
 		messages.TypeHeartbeat,
-		"self", // Sender ID will be set by transport
+		hm.peerID, // Use our actual peer ID
 		messages.HeartbeatMessage{
 			Timestamp: time.Now().UnixMilli(),
 		},

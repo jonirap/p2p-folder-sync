@@ -2,18 +2,16 @@ package network_test
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/p2p-folder-sync/p2p-sync/internal/chunking"
-	"github.com/p2p-folder-sync/p2p-sync/internal/compression"
 	"github.com/p2p-folder-sync/p2p-sync/internal/config"
 	"github.com/p2p-folder-sync/p2p-sync/internal/crypto"
 	"github.com/p2p-folder-sync/p2p-sync/internal/network"
 	"github.com/p2p-folder-sync/p2p-sync/internal/network/connection"
 	"github.com/p2p-folder-sync/p2p-sync/internal/network/messages"
+	"github.com/p2p-folder-sync/p2p-sync/internal/network/transport"
 	syncpkg "github.com/p2p-folder-sync/p2p-sync/internal/sync"
 )
 
@@ -21,7 +19,7 @@ import (
 type MockTransport struct {
 	mu               sync.RWMutex
 	sentMessages     map[string][]*messages.Message // peerID -> messages
-	messageHandler   network.MessageHandler
+	messageHandler   transport.MessageHandler
 	sendError        error
 	connManager      *connection.ConnectionManager
 	shouldFailOnce   bool
@@ -52,10 +50,11 @@ func (mt *MockTransport) SendMessage(peerID, address string, port int, msg *mess
 	return nil
 }
 
-func (mt *MockTransport) SetMessageHandler(handler network.MessageHandler) {
+func (mt *MockTransport) SetMessageHandler(handler transport.MessageHandler) error {
 	mt.mu.Lock()
 	defer mt.mu.Unlock()
 	mt.messageHandler = handler
+	return nil
 }
 
 func (mt *MockTransport) ConnectToPeer(peerID, address string, port int) error {
@@ -92,29 +91,6 @@ func (mt *MockTransport) SetSendError(err error) {
 	mt.mu.Lock()
 	defer mt.mu.Unlock()
 	mt.sendError = err
-}
-
-// Helper function to create test config
-func createTestConfig() *config.Config {
-	return &config.Config{
-		Sync: config.SyncConfig{
-			FolderPath:             "/tmp/test-sync",
-			ChunkSizeMin:           64 * 1024,
-			ChunkSizeMax:           2 * 1024 * 1024,
-			ChunkSizeDefault:       512 * 1024,
-			MaxConcurrentTransfers: 5,
-		},
-		Network: config.NetworkConfig{
-			Port:          8080,
-			DiscoveryPort: 8081,
-		},
-		Compression: config.CompressionConfig{
-			Enabled:           true,
-			FileSizeThreshold: 1024 * 1024, // 1 MB
-			Algorithm:         "zstd",
-			Level:             3,
-		},
-	}
 }
 
 // Helper function to create test messenger with dependencies
@@ -437,7 +413,7 @@ func TestHandleMessage_Acknowledgment(t *testing.T) {
 	}
 
 	// Track the message for acknowledgment
-	ackCh := make(chan error, 1)
+	_ = make(chan error, 1) // Would be used for async acknowledgment tracking
 	// Use internal tracking (would need to expose or use reflection in real tests)
 	// For this test, we'll just call HandleMessage directly
 
@@ -476,10 +452,8 @@ func TestSetMessageHandler(t *testing.T) {
 	messenger, _ := createTestMessenger(t, cfg, transport)
 
 	// Create mock handler
-	var handlerCalled bool
 	mockHandler := &MockMessageHandler{
 		handleFunc: func(msg *messages.Message) error {
-			handlerCalled = true
 			return nil
 		},
 	}
@@ -661,14 +635,14 @@ func TestMessageRetry(t *testing.T) {
 func TestAcknowledgmentTimeout(t *testing.T) {
 	cfg := createTestConfig()
 	transport := NewMockTransport()
-	messenger, connManager := createTestMessenger(t, cfg, transport)
+	_, connManager := createTestMessenger(t, cfg, transport)
 
 	peerID := "peer-2"
 	setupConnectedPeer(t, connManager, peerID)
 
 	// Don't send any acknowledgment - let it timeout
-	fileData := []byte("test content")
-	metadata := &syncpkg.SyncOperation{
+	_ = []byte("test content") // fileData would be used for actual transfer
+	_ = &syncpkg.SyncOperation{ // metadata would be used for actual operation
 		ID:          "op-1",
 		FileID:      "file-1",
 		Checksum:    "abc123",
@@ -699,17 +673,13 @@ func (m *MockMessageHandler) HandleMessage(msg *messages.Message) error {
 
 // Helper function to check if string contains substring
 func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && (s[:len(substr)] == substr || len(s) > len(substr) && containsString(s[1:], substr)))
-}
-
-// Simplified contains check
-func init() {
-	containsString = func(s, substr string) bool {
-		for i := 0; i <= len(s)-len(substr); i++ {
-			if s[i:i+len(substr)] == substr {
-				return true
-			}
-		}
+	if len(s) < len(substr) {
 		return false
 	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

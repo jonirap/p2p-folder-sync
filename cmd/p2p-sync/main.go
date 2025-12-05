@@ -192,7 +192,7 @@ func main() {
 	messageHandler := network.NewNetworkMessageHandler(cfg, nil, nil, peerID) // syncEngine and heartbeatManager will be set later
 
 	// Initialize heartbeat manager
-	heartbeatManager := connection.NewHeartbeatManager(connManager, networkTransport, cfg)
+	heartbeatManager := connection.NewHeartbeatManager(connManager, networkTransport, cfg, peerID)
 	heartbeatManager.Start()
 
 	// Set heartbeat manager in message handler
