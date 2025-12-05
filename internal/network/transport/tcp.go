@@ -128,6 +128,8 @@ func (t *TCPTransport) accept() {
 func (t *TCPTransport) handleConnection(conn *net.TCPConn) {
 	defer conn.Close()
 
+	fmt.Printf("DEBUG [TCP handleConnection]: Started for connection from %v\n", conn.RemoteAddr())
+
 	// Set keep-alive
 	conn.SetKeepAlive(true)
 	conn.SetKeepAlivePeriod(60 * time.Second)
@@ -141,12 +143,15 @@ func (t *TCPTransport) handleConnection(conn *net.TCPConn) {
 	for {
 		select {
 		case <-t.stopCh:
+			fmt.Printf("DEBUG [TCP handleConnection]: Stopped via stopCh for peer %s\n", peerID)
 			return
 		default:
 			var msg messages.Message
 			if err := decoder.Decode(&msg); err != nil {
+				fmt.Printf("DEBUG [TCP handleConnection]: Decode error from %s (connection %v): %v\n", peerID, conn.RemoteAddr(), err)
 				return
 			}
+			fmt.Printf("DEBUG [TCP handleConnection]: Decoded message type=%s from %s\n", msg.Type, msg.SenderID)
 
 			// Register incoming connection on first message if we have a connection manager
 			if !connectionRegistered && t.connManager != nil && msg.SenderID != "" {
@@ -180,9 +185,15 @@ func (t *TCPTransport) handleConnection(conn *net.TCPConn) {
 						}
 					}
 
-					// Store the connection for our internal tracking
+					// Store the connection for our internal tracking ONLY if we don't already have one
+					// (to avoid overwriting outbound connections with incoming ones)
 					t.connectionsMu.Lock()
-					t.connections[peerID] = conn
+					if _, exists := t.connections[peerID]; !exists {
+						t.connections[peerID] = conn
+						fmt.Printf("DEBUG [TCP]: Stored incoming connection for peer %s\n", peerID)
+					} else {
+						fmt.Printf("DEBUG [TCP]: Skipping storage of incoming connection for peer %s (already have outbound)\n", peerID)
+					}
 					t.connectionsMu.Unlock()
 
 					// Send handshake acknowledgment
@@ -206,7 +217,12 @@ func (t *TCPTransport) handleConnection(conn *net.TCPConn) {
 				t.connManager.UpdateConnectionState(peerID, connection.StateConnected)
 
 				t.connectionsMu.Lock()
-				t.connections[peerID] = conn
+				if _, exists := t.connections[peerID]; !exists {
+					t.connections[peerID] = conn
+					fmt.Printf("DEBUG [TCP]: Stored incoming connection for peer %s (non-handshake first message)\n", peerID)
+				} else {
+					fmt.Printf("DEBUG [TCP]: Skipping storage of incoming connection for peer %s (already have outbound, non-handshake first)\n", peerID)
+				}
 				t.connectionsMu.Unlock()
 
 				connectionRegistered = true
@@ -236,8 +252,10 @@ func (t *TCPTransport) handleConnection(conn *net.TCPConn) {
 			}
 
 			// Handle message via message handler
+			fmt.Printf("DEBUG [TCP handleConnection]: Received message type=%s from sender=%s, handler=%v\n", msg.Type, msg.SenderID, t.handler != nil)
 			if t.handler != nil {
 				if err := t.handler.HandleMessage(&msg); err != nil {
+					fmt.Printf("DEBUG [TCP handleConnection]: Handler error for type=%s: %v\n", msg.Type, err)
 					// Send error acknowledgment
 					ack := messages.NewMessage(messages.TypeOperationAck, "", messages.OperationAckMessage{
 						OperationID: msg.ID,
@@ -247,6 +265,9 @@ func (t *TCPTransport) handleConnection(conn *net.TCPConn) {
 					encoder.Encode(ack)
 					continue
 				}
+				fmt.Printf("DEBUG [TCP handleConnection]: Handler success for type=%s\n", msg.Type)
+			} else {
+				fmt.Printf("DEBUG [TCP handleConnection]: No handler set! Message type=%s dropped\n", msg.Type)
 			}
 
 			// Send success acknowledgment
@@ -266,6 +287,8 @@ func (t *TCPTransport) SendMessage(peerID string, address string, port int, msg 
 	if err != nil {
 		return fmt.Errorf("failed to get connection to %s:%d: %w", address, port, err)
 	}
+
+	fmt.Printf("DEBUG [TCP SendMessage]: Sending type=%s to peer=%s on connection %v\n", msg.Type, peerID, conn.RemoteAddr())
 
 	// Encode and send the message
 	encoder := json.NewEncoder(conn)

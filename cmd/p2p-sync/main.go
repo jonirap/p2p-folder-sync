@@ -155,40 +155,7 @@ func main() {
 		peerIDSetter.SetPeerID(peerID)
 	}
 
-	// Try to start the transport
-	if err := networkTransport.Start(); err != nil {
-		logger.Warn("Failed to start primary transport, attempting fallback",
-			zap.String("protocol", protocol), zap.Error(err))
-
-		// Fallback logic: if QUIC fails, try TCP
-		if protocol == "quic" {
-			logger.Info("Attempting TCP fallback")
-			networkTransport, err = transportFactory.NewTransport("tcp", cfg.Network.Port)
-			if err != nil {
-				logger.Fatal("Failed to create TCP fallback transport", zap.Error(err))
-			}
-			// Set connection manager on fallback transport
-			if setter, ok := networkTransport.(interface{ SetConnectionManager(*connection.ConnectionManager) }); ok {
-				setter.SetConnectionManager(connManager)
-			}
-			// Set peer ID on fallback transport
-			if peerIDSetter, ok := networkTransport.(interface{ SetPeerID(string) }); ok {
-				peerIDSetter.SetPeerID(peerID)
-			}
-			if err := networkTransport.Start(); err != nil {
-				logger.Fatal("Failed to start TCP fallback transport", zap.Error(err))
-			}
-			logger.Info("TCP fallback transport started", zap.Int("port", cfg.Network.Port))
-		} else {
-			logger.Fatal("Failed to start network transport", zap.Error(err))
-		}
-	} else {
-		logger.Info("Network transport started",
-			zap.String("protocol", protocol), zap.Int("port", cfg.Network.Port))
-	}
-	defer networkTransport.Stop()
-
-	// Initialize network message handler
+	// Initialize network message handler BEFORE starting transport
 	messageHandler := network.NewNetworkMessageHandler(cfg, nil, nil, peerID) // syncEngine and heartbeatManager will be set later
 
 	// Initialize heartbeat manager
@@ -211,6 +178,43 @@ func main() {
 	if err := networkTransport.SetMessageHandler(networkMessenger); err != nil {
 		logger.Fatal("Failed to set message handler", zap.Error(err))
 	}
+
+	// NOW start the transport after handlers are set
+	if err := networkTransport.Start(); err != nil {
+		logger.Warn("Failed to start primary transport, attempting fallback",
+			zap.String("protocol", protocol), zap.Error(err))
+
+		// Fallback logic: if QUIC fails, try TCP
+		if protocol == "quic" {
+			logger.Info("Attempting TCP fallback")
+			networkTransport, err = transportFactory.NewTransport("tcp", cfg.Network.Port)
+			if err != nil {
+				logger.Fatal("Failed to create TCP fallback transport", zap.Error(err))
+			}
+			// Set connection manager on fallback transport
+			if setter, ok := networkTransport.(interface{ SetConnectionManager(*connection.ConnectionManager) }); ok {
+				setter.SetConnectionManager(connManager)
+			}
+			// Set peer ID on fallback transport
+			if peerIDSetter, ok := networkTransport.(interface{ SetPeerID(string) }); ok {
+				peerIDSetter.SetPeerID(peerID)
+			}
+			// Set message handler on fallback transport BEFORE starting
+			if err := networkTransport.SetMessageHandler(networkMessenger); err != nil {
+				logger.Fatal("Failed to set message handler on fallback", zap.Error(err))
+			}
+			if err := networkTransport.Start(); err != nil {
+				logger.Fatal("Failed to start TCP fallback transport", zap.Error(err))
+			}
+			logger.Info("TCP fallback transport started", zap.Int("port", cfg.Network.Port))
+		} else {
+			logger.Fatal("Failed to start network transport", zap.Error(err))
+		}
+	} else {
+		logger.Info("Network transport started",
+			zap.String("protocol", protocol), zap.Int("port", cfg.Network.Port))
+	}
+	defer networkTransport.Stop()
 
 	// Initialize sync engine with messenger
 	syncEngine, err := sync.NewEngineWithMessenger(cfg, db, peerID, networkMessenger)

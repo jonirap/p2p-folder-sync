@@ -83,12 +83,16 @@ func NewNetworkMessenger(cfg *config.Config, connManager *connection.ConnectionM
 
 // SendFile sends a file to a specific peer with compression, chunking, and encryption
 func (nm *NetworkMessenger) SendFile(peerID string, fileData []byte, metadata *syncpkg.SyncOperation) error {
+	log.Printf("DEBUG [SendFile]: Called for peer %s, file %s, size %d", peerID, metadata.Path, len(fileData))
 	// Acquire transfer slot for concurrency control
 	ctx := context.Background()
+	log.Printf("DEBUG [SendFile]: Acquiring transfer slot for %s", metadata.FileID)
 	if err := nm.flowController.AcquireTransferSlot(ctx, metadata.FileID); err != nil {
+		log.Printf("DEBUG [SendFile]: Failed to acquire transfer slot: %v", err)
 		return fmt.Errorf("failed to acquire transfer slot: %w", err)
 	}
 	defer nm.flowController.ReleaseTransferSlot(metadata.FileID)
+	log.Printf("DEBUG [SendFile]: Acquired transfer slot for %s", metadata.FileID)
 
 	// Check if peer is connected
 	conn, err := nm.connManager.GetConnection(peerID)
@@ -123,11 +127,15 @@ func (nm *NetworkMessenger) SendFile(peerID string, fileData []byte, metadata *s
 
 	// Check if we need to chunk the file
 	if int64(len(compressedData)) > nm.config.Sync.ChunkSizeDefault {
+		log.Printf("DEBUG [SendFile]: Sending chunked file to %s", peerID)
 		return nm.sendChunkedFile(peerID, compressedData, metadata)
 	}
 
 	// Send as single sync operation
-	return nm.sendSyncOperation(peerID, compressedData, metadata)
+	log.Printf("DEBUG [SendFile]: Sending single sync operation to %s", peerID)
+	err = nm.sendSyncOperation(peerID, compressedData, metadata)
+	log.Printf("DEBUG [SendFile]: sendSyncOperation result for %s: %v", peerID, err)
+	return err
 }
 
 // sendChunkedFile sends a large file as multiple chunks
@@ -221,7 +229,8 @@ func (nm *NetworkMessenger) sendSyncOperation(peerID string, fileData []byte, me
 func (nm *NetworkMessenger) BroadcastOperation(op *syncpkg.SyncOperation) error {
 	connectedPeers := nm.connManager.GetConnectedPeers()
 
-	log.Printf("DEBUG [NetworkMessenger]: BroadcastOperation called for %s %s, connected peers: %d", op.Type, op.Path, len(connectedPeers))
+	log.Printf("DEBUG [NetworkMessenger]: BroadcastOperation called for %s %s, connected peers: %d, list: %v", op.Type, op.Path, len(connectedPeers), connectedPeers)
+	log.Printf("DEBUG [NetworkMessenger]: Our peer ID: %s, operation peer ID: %s", nm.peerID, op.PeerID)
 
 	if len(connectedPeers) == 0 {
 		log.Printf("DEBUG [NetworkMessenger]: No peers connected, cannot broadcast %s %s", op.Type, op.Path)
@@ -229,35 +238,60 @@ func (nm *NetworkMessenger) BroadcastOperation(op *syncpkg.SyncOperation) error 
 		return nil
 	}
 
+	// Send to each peer concurrently to avoid blocking
+	var wg sync.WaitGroup
 	var lastErr error
+	var errMu sync.Mutex
+
 	for _, peerID := range connectedPeers {
+		log.Printf("DEBUG [NetworkMessenger]: Checking peer %s (op.PeerID=%s)", peerID, op.PeerID)
 		if peerID == op.PeerID {
 			// Don't send to ourselves
+			log.Printf("DEBUG [NetworkMessenger]: Skipping peer %s (same as operation peer ID)", peerID)
 			continue
 		}
 
-		// For create/update operations, we need to read the file
-		if op.Type == syncpkg.OpCreate || op.Type == syncpkg.OpUpdate {
-			// Read file data from disk
-			filePath := filepath.Join(nm.config.Sync.FolderPath, op.Path)
-			fileData, err := os.ReadFile(filePath)
-			if err != nil {
-				lastErr = fmt.Errorf("failed to read file %s: %w", filePath, err)
-				continue
-			}
+		wg.Add(1)
+		go func(pid string) {
+			defer wg.Done()
 
-			// Send file data to peer
-			if err := nm.SendFile(peerID, fileData, op); err != nil {
-				lastErr = fmt.Errorf("failed to send to peer %s: %w", peerID, err)
+			// For create/update operations, we need to read the file
+			if op.Type == syncpkg.OpCreate || op.Type == syncpkg.OpUpdate {
+				// Read file data from disk
+				filePath := filepath.Join(nm.config.Sync.FolderPath, op.Path)
+				log.Printf("DEBUG [NetworkMessenger]: Reading file %s for peer %s", filePath, pid)
+				fileData, err := os.ReadFile(filePath)
+				if err != nil {
+					log.Printf("DEBUG [NetworkMessenger]: Failed to read file %s: %v", filePath, err)
+					errMu.Lock()
+					lastErr = fmt.Errorf("failed to read file %s: %w", filePath, err)
+					errMu.Unlock()
+					return
+				}
+
+				// Send file data to peer
+				log.Printf("DEBUG [NetworkMessenger]: Sending file %s (%d bytes) to peer %s", op.Path, len(fileData), pid)
+				if err := nm.SendFile(pid, fileData, op); err != nil {
+					log.Printf("DEBUG [NetworkMessenger]: Failed to send file to peer %s: %v", pid, err)
+					errMu.Lock()
+					lastErr = fmt.Errorf("failed to send to peer %s: %w", pid, err)
+					errMu.Unlock()
+				} else {
+					log.Printf("DEBUG [NetworkMessenger]: Successfully sent file %s to peer %s", op.Path, pid)
+				}
+			} else {
+				// For other operations (delete, rename), send metadata only
+				if err := nm.sendSyncOperation(pid, []byte{}, op); err != nil {
+					errMu.Lock()
+					lastErr = fmt.Errorf("failed to send to peer %s: %w", pid, err)
+					errMu.Unlock()
+				}
 			}
-		} else {
-			// For other operations (delete, rename), send metadata only
-			if err := nm.sendSyncOperation(peerID, []byte{}, op); err != nil {
-				lastErr = fmt.Errorf("failed to send to peer %s: %w", peerID, err)
-			}
-		}
+		}(peerID)
 	}
 
+	// Wait for all sends to complete
+	wg.Wait()
 	return lastErr
 }
 
@@ -301,22 +335,28 @@ func (nm *NetworkMessenger) sendMessage(peerID string, msg *messages.Message) er
 		}
 
 		// Send the message via transport
+		log.Printf("DEBUG [sendMessage]: Sending message %s to peer %s", msg.ID, peerID)
 		if err := nm.transport.SendMessage(peerID, conn.Address, conn.Port, encryptedMsg); err != nil {
+			log.Printf("DEBUG [sendMessage]: Send failed for peer %s: %v", peerID, err)
 			lastErr = fmt.Errorf("send attempt %d failed: %w", attempt+1, err)
 			continue
 		}
+		log.Printf("DEBUG [sendMessage]: Message sent, waiting for ack from %s", peerID)
 
 		// Wait for acknowledgment
 		select {
 		case ackErr := <-ackCh:
 			if ackErr != nil {
+				log.Printf("DEBUG [sendMessage]: Ack error from %s: %v", peerID, ackErr)
 				lastErr = fmt.Errorf("acknowledgment error: %w", ackErr)
 				continue
 			}
 			// Success!
+			log.Printf("DEBUG [sendMessage]: Got ack from %s, success!", peerID)
 			nm.untrackAcknowledgment(msg.ID)
 			return nil
 		case <-time.After(nm.ackTimeout):
+			log.Printf("DEBUG [sendMessage]: Ack timeout from %s after %v", peerID, nm.ackTimeout)
 			lastErr = fmt.Errorf("acknowledgment timeout after %v", nm.ackTimeout)
 			continue
 		}
