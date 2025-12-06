@@ -68,7 +68,7 @@ This guide helps developers set up their environment, understand the codebase, a
 
 1. **Clone the repository**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/jonirap/p2p-folder-sync
    cd p2p-folder-sync
    ```
 
