@@ -23,7 +23,7 @@ func NewDB(dbPath string) (*DB, error) {
 	}
 
 	// Open database connection
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}

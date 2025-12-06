@@ -33,12 +33,19 @@ type Engine struct {
 	renameDetector   *filesystem.RenameDetector
 	conflictResolver *conflict.Resolver
 	messenger        Messenger
-	operationQueue   map[string][]*SyncOperation
-	queueMu          sync.RWMutex
+	operationQueue   *OperationQueue
 	peerID           string
 	stopCh           chan struct{}
 	stopped          bool
 	stopMu           sync.Mutex
+	// Cache of recently written file paths to avoid re-broadcasting
+	recentWrites    map[string]time.Time // path -> timestamp
+	recentWritesMu  sync.RWMutex
+	recentWritesTTL time.Duration // How long to keep paths in cache
+	// Database mutex to serialize concurrent writes (BoltDB only allows one writer)
+	dbMu sync.Mutex
+	// Semaphore to limit concurrent async file processing
+	asyncSem chan struct{}
 }
 
 // NewEngine creates a new sync engine
@@ -60,9 +67,12 @@ func NewEngineWithMessenger(cfg *config.Config, db *database.DB, peerID string, 
 		renameDetector:   filesystem.NewRenameDetector(),
 		conflictResolver: conflict.NewResolver(cfg.Conflict.ResolutionStrategy),
 		messenger:        messenger,
-		operationQueue:   make(map[string][]*SyncOperation),
+		operationQueue:   NewOperationQueue(),
 		peerID:           peerID,
 		stopCh:           make(chan struct{}),
+		recentWrites:     make(map[string]time.Time),
+		recentWritesTTL:  5 * time.Second, // Keep paths for 5 seconds
+		asyncSem:         make(chan struct{}, 10), // Limit to 10 concurrent async operations
 	}
 
 	return engine, nil
@@ -89,6 +99,9 @@ func (e *Engine) Start(ctx context.Context) error {
 
 	// Start periodic state synchronization
 	go e.periodicStateSync()
+
+	// Start periodic cleanup of recent writes cache
+	go e.periodicRecentWritesCleanup()
 
 	return nil
 }
@@ -118,25 +131,100 @@ func (e *Engine) GetAllFiles() ([]*database.FileMetadata, error) {
 	return e.db.GetAllFiles()
 }
 
+// addRecentWrite adds a file path to the recent writes cache
+func (e *Engine) addRecentWrite(path string) {
+	e.recentWritesMu.Lock()
+	defer e.recentWritesMu.Unlock()
+	e.recentWrites[path] = time.Now()
+}
+
+// isRecentWrite checks if a checksum was recently written
+func (e *Engine) isRecentWrite(checksum string) bool {
+	e.recentWritesMu.RLock()
+	defer e.recentWritesMu.RUnlock()
+
+	writeTime, exists := e.recentWrites[checksum]
+	if !exists {
+		return false
+	}
+
+	// Check if entry has expired
+	if time.Since(writeTime) > e.recentWritesTTL {
+		return false
+	}
+
+	return true
+}
+
+// cleanupRecentWrites removes expired entries from the cache
+func (e *Engine) cleanupRecentWrites() {
+	e.recentWritesMu.Lock()
+	defer e.recentWritesMu.Unlock()
+
+	now := time.Now()
+	for checksum, writeTime := range e.recentWrites {
+		if now.Sub(writeTime) > e.recentWritesTTL {
+			delete(e.recentWrites, checksum)
+		}
+	}
+}
+
+// periodicRecentWritesCleanup runs cleanup for the recent writes cache
+func (e *Engine) periodicRecentWritesCleanup() {
+	// Cleanup every minute
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-e.stopCh:
+			log.Printf("Stopping periodic recent writes cleanup")
+			return
+		case <-ticker.C:
+			log.Printf("Running periodic recent writes cleanup")
+			e.cleanupRecentWrites()
+		}
+	}
+}
+
 // HandleIncomingFile handles a file operation received from a peer (remote operation)
-// This implements sync loop prevention by temporarily disabling the file watcher
+// This function returns immediately after validation to allow fast ACK responses.
+// The actual file processing happens asynchronously.
 func (e *Engine) HandleIncomingFile(fileData []byte, metadata *SyncOperation) error {
 	// Mark as remote operation
 	metadata.Source = "remote"
 
+	// Add checksum to recent writes cache IMMEDIATELY to prevent re-broadcast
+	// This must happen before we return, even in async mode
+	if metadata.Checksum != "" {
+		e.addRecentWrite(metadata.Checksum)
+	}
+
+	// Process file asynchronously to avoid blocking ACK response
+	// Make a copy of the data since the caller may reuse the buffer
+	fileDataCopy := make([]byte, len(fileData))
+	copy(fileDataCopy, fileData)
+
+	go e.processIncomingFileAsync(fileDataCopy, metadata)
+
+	return nil
+}
+
+// processIncomingFileAsync processes an incoming file in the background
+func (e *Engine) processIncomingFileAsync(fileData []byte, metadata *SyncOperation) {
 	// Convert relative path to absolute path
 	absPath := filepath.Join(e.config.Sync.FolderPath, metadata.Path)
-
-	// Temporarily disable file system watcher for this path
-	e.watcher.IgnorePath(absPath)
-	defer func() {
-		// Ensure re-enabling even on error (with delay to allow write to complete)
-		time.Sleep(100 * time.Millisecond)
-		e.watcher.WatchPath(absPath)
-	}()
+	var err error
 
 	switch metadata.Type {
 	case OpCreate, OpUpdate:
+		// Temporarily disable file system watcher for this path to prevent sync loops
+		e.watcher.IgnorePath(absPath)
+		defer func() {
+			time.Sleep(10 * time.Millisecond)
+			e.watcher.WatchPath(absPath)
+		}()
+
 		// Check for conflicts before writing
 		localFile, err := e.db.GetFileByID(metadata.FileID)
 		if err == nil {
@@ -184,7 +272,8 @@ func (e *Engine) HandleIncomingFile(fileData []byte, metadata *SyncOperation) er
 				// Resolve conflict
 				winner, err := e.conflictResolver.ResolveConflict(localOp, remoteOp, conflict.VectorClock(localVC), conflict.VectorClock(remoteVC))
 				if err != nil {
-					return fmt.Errorf("failed to resolve conflict: %w", err)
+					log.Printf("ERROR [processIncomingFileAsync]: Failed to resolve conflict: %v", err)
+					return
 				}
 
 				// Check if winner is a merge result or one of the original operations
@@ -197,7 +286,8 @@ func (e *Engine) HandleIncomingFile(fileData []byte, metadata *SyncOperation) er
 					// Read local file data
 					localData, err := os.ReadFile(absPath)
 					if err != nil {
-						return fmt.Errorf("failed to read local file for broadcast: %w", err)
+						log.Printf("ERROR [processIncomingFileAsync]: Failed to read local file for broadcast: %v", err)
+						return
 					}
 
 					// Create operation to broadcast
@@ -224,7 +314,7 @@ func (e *Engine) HandleIncomingFile(fileData []byte, metadata *SyncOperation) er
 					}
 
 					// Don't apply remote change
-					return nil
+					return
 				} else if isMergeResult {
 					// Merge occurred - apply merged result and broadcast
 					// Update metadata with merged data
@@ -262,7 +352,8 @@ func (e *Engine) HandleIncomingFile(fileData []byte, metadata *SyncOperation) er
 		log.Printf("DEBUG [Engine]: Writing file to %s (%d bytes)", absPath, len(fileData))
 		if err := e.atomicWriteFile(absPath, fileData); err != nil {
 			log.Printf("DEBUG [Engine]: Failed to write file: %v", err)
-			return fmt.Errorf("failed to write file: %w", err)
+			log.Printf("ERROR [processIncomingFileAsync]: Failed to write file: %v", err)
+			return
 		}
 		log.Printf("DEBUG [Engine]: Successfully wrote file to %s", absPath)
 
@@ -287,29 +378,44 @@ func (e *Engine) HandleIncomingFile(fileData []byte, metadata *SyncOperation) er
 			}(),
 			OriginalSize:         metadata.OriginalSize,
 			CompressionAlgorithm: metadata.CompressionAlgorithm,
-		}
+		} // Serialize database writes to avoid BoltDB lock contention
+		e.dbMu.Lock()
+		err = e.db.InsertFile(fileMetadata)
+		e.dbMu.Unlock()
 
-		if err := e.db.InsertFile(fileMetadata); err != nil {
-			return fmt.Errorf("failed to update database: %w", err)
+		if err != nil {
+			log.Printf("ERROR [processIncomingFileAsync]: Failed to update database: %v", err)
+			return
 		}
 
 	case OpDelete:
+		// Temporarily disable file system watcher for this path to prevent sync loops
+		e.watcher.IgnorePath(absPath)
+		defer func() {
+			time.Sleep(10 * time.Millisecond)
+			e.watcher.WatchPath(absPath)
+		}()
+
 		// Delete the file
 		if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("failed to delete file: %w", err)
+			log.Printf("ERROR [processIncomingFileAsync]: Failed to delete file: %v", err)
+			return
 		}
 
 		// Remove from database
-		if err := e.db.DeleteFile(metadata.FileID); err != nil {
-			return fmt.Errorf("failed to delete file from database: %w", err)
+		e.dbMu.Lock()
+		err = e.db.DeleteFile(metadata.FileID)
+		e.dbMu.Unlock()
+
+		if err != nil {
+			log.Printf("ERROR [processIncomingFileAsync]: Failed to delete file from database: %v", err)
+			return
 		}
 	}
 
 	// Log operation but do not broadcast (since it's already received)
 	// In a full implementation, this would be stored for recovery purposes
 	_ = metadata
-
-	return nil
 }
 
 // HandleIncomingRename handles a rename operation received from a peer (remote operation)
@@ -364,7 +470,12 @@ func (e *Engine) HandleIncomingRename(metadata *SyncOperation) error {
 		CompressionAlgorithm: metadata.CompressionAlgorithm,
 	}
 
-	if err := e.db.InsertFile(fileMetadata); err != nil {
+	// Serialize database writes to avoid BoltDB lock contention
+	e.dbMu.Lock()
+	err := e.db.InsertFile(fileMetadata)
+	e.dbMu.Unlock()
+
+	if err != nil {
 		return fmt.Errorf("failed to update database: %w", err)
 	}
 
@@ -524,7 +635,12 @@ func (e *Engine) handleCreate(path string) {
 			Mtime:    time.Now(), // Use current time for local files
 			PeerID:   e.peerID,
 		}
-		if err := e.db.InsertFile(fileMetadata); err != nil {
+		// Serialize database writes to avoid BoltDB lock contention
+		e.dbMu.Lock()
+		err := e.db.InsertFile(fileMetadata)
+		e.dbMu.Unlock()
+
+		if err != nil {
 			// Log error but continue
 			_ = err
 		}
@@ -582,7 +698,12 @@ func (e *Engine) handleUpdate(path string) {
 		Mtime:    time.Now(), // Use current time for local files
 		PeerID:   e.peerID,
 	}
-	if err := e.db.InsertFile(fileMetadata); err != nil {
+	// Serialize database writes to avoid BoltDB lock contention
+	e.dbMu.Lock()
+	err = e.db.InsertFile(fileMetadata)
+	e.dbMu.Unlock()
+
+	if err != nil {
 		// Log error but continue
 		_ = err
 	}
@@ -598,19 +719,42 @@ func (e *Engine) handleDelete(path string) {
 	// Convert absolute path to relative path for database lookup
 	relPath, err := filepath.Rel(e.config.Sync.FolderPath, path)
 	if err != nil {
+		log.Printf("ERROR [handleDelete]: Failed to get relative path for %s: %v", path, err)
 		return // Skip if we can't make it relative
 	}
+
+	var fileID string
+	var checksum string
+	var size int64
+	var mtime time.Time
 
 	// Get file info from database before deletion
 	file, err := e.db.GetFileByPath(relPath)
 	if err != nil {
-		return
+		log.Printf("WARN [handleDelete]: Could not get file %s from DB (maybe it was never tracked): %v. Generating FileID from path to propagate deletion.", relPath, err)
+		// If we can't get it from the DB, we can still generate the FileID from the path
+		// to propagate the deletion. This must use the absolute path to be consistent
+		// with how FileIDs are generated in handleCreate/handleUpdate.
+		generatedFileID, idErr := hashing.GenerateFileID(path, e.peerID)
+		if idErr != nil {
+			log.Printf("ERROR [handleDelete]: Could not generate FileID for deleted path %s: %v. Deletion cannot be propagated.", path, idErr)
+			return
+		}
+		fileID = generatedFileID
+	} else {
+		fileID = file.FileID
+		checksum = file.Checksum
+		size = file.Size
+		mtime = file.Mtime
 	}
 
 	// Record deletion for rename detection
-	e.renameDetector.RecordDelete(file.FileID, file.Checksum, path, file.Size, file.Mtime)
+	// Only do this if we had the file info
+	if err == nil {
+		e.renameDetector.RecordDelete(fileID, checksum, path, size, mtime)
+	}
 
-	op := NewSyncOperation(OpDelete, relPath, file.FileID, e.peerID)
+	op := NewSyncOperation(OpDelete, relPath, fileID, e.peerID)
 	e.queueOperation(op)
 }
 
@@ -623,11 +767,8 @@ func (e *Engine) handleRename(path string) {
 
 // queueOperation queues an operation for processing and stores it in the database
 func (e *Engine) queueOperation(op *SyncOperation) {
-	e.queueMu.Lock()
-	defer e.queueMu.Unlock()
-
 	// Add to file-specific queue
-	e.operationQueue[op.FileID] = append(e.operationQueue[op.FileID], op)
+	e.operationQueue.Enqueue(op.FileID, op)
 
 	// Convert SyncOperation to LogEntry
 	logEntry := &database.LogEntry{
@@ -654,10 +795,12 @@ func (e *Engine) queueOperation(op *SyncOperation) {
 	}
 
 	// Store in database
+	e.dbMu.Lock()
 	if err := e.db.AppendOperation(logEntry); err != nil {
 		// Log error but don't fail the operation
 		_ = err
 	}
+	e.dbMu.Unlock()
 
 	// Broadcast operation to peers if messenger is available
 	if e.messenger != nil {
@@ -832,8 +975,8 @@ func (e *Engine) logEntryToSyncOperation(entry *database.LogEntry) (*SyncOperati
 		Source:               "local", // Mark as local since we're replaying from our log
 		Mtime:                getTimeInt64Value(entry.Mtime),
 		Mode:                 entry.Mode,
-		Data:                 entry.Data,
-		Compressed:           getDefaultBool(entry.Compressed),
+		Data:                 entry.Data, // Data is not typically stored in log for replay, but handle if present
+		Compressed:           &entry.Compressed,
 		OriginalSize:         entry.OriginalSize,
 		CompressionAlgorithm: entry.CompressionAlgorithm,
 	}
@@ -872,10 +1015,6 @@ func getTimeInt64Value(ptr *time.Time) int64 {
 		return ptr.Unix()
 	}
 	return 0
-}
-
-func getDefaultBool(val bool) *bool {
-	return &val
 }
 
 // periodicLogCompaction runs log compaction periodically to prevent unbounded log growth
