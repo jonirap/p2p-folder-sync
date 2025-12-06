@@ -61,7 +61,7 @@ Best for: Development, testing, simple deployments
 
 ```bash
 # Download latest release
-wget https://github.com/yourorg/p2p-sync/releases/download/v1.0.0/p2p-sync-linux-amd64
+wget https://github.com/jonirap/p2p-folder-sync/releases/download/v1.0.0/p2p-sync-linux-amd64
 
 # Make executable
 chmod +x p2p-sync-linux-amd64

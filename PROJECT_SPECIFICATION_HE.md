@@ -1696,7 +1696,7 @@ func (e *Engine) ProcessOperation(op *SyncOperation) error {
 - `p2p-sync-darwin-arm64`
 - `p2p-sync-windows-amd64.exe`
 - `checksums.txt`
-- תמונת Docker: `ghcr.io/yourorg/p2p-sync:latest` ו-`ghcr.io/yourorg/p2p-sync:v1.0.0`
+- תמונת Docker: `jonirap/p2p-folder-sync:latest` ו-`jonirap/p2p-folder-sync:v1.0.0`
 
 ### 7.3 קרסי Pre-commit
 
@@ -1915,7 +1915,7 @@ spec:
     spec:
       containers:
         - name: p2p-sync
-          image: ghcr.io/yourorg/p2p-sync:latest
+          image: jonirap/p2p-folder-sync:latest
           ports:
             - containerPort: 8080
               name: sync

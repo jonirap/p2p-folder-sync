@@ -974,7 +974,7 @@ Keep diagrams under 80 characters wide when possible
 - `p2p-sync-darwin-arm64`
 - `p2p-sync-windows-amd64.exe`
 - `checksums.txt`
-- Docker image: `ghcr.io/yourorg/p2p-sync:latest` and `ghcr.io/yourorg/p2p-sync:v1.0.0`
+- Docker image: `jonirap/p2p-folder-sync:latest` and `jonirap/p2p-folder-sync:v1.0.0`
 
 ### 7.3 Pre-commit Hooks
 
@@ -1179,7 +1179,7 @@ spec:
     spec:
       containers:
       - name: p2p-sync
-        image: ghcr.io/yourorg/p2p-sync:latest
+        image: jonirap/p2p-folder-sync:latest
         ports:
         - containerPort: 8080
           name: sync
