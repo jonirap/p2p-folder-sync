@@ -44,110 +44,127 @@ P2P Folder Sync is a distributed peer-to-peer file synchronization system that m
 
 ### High-Level System Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        P2P Sync Node                        │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  ┌───────────────┐  ┌────────────┐  ┌──────────────┐      │
-│  │  File System  │  │   Sync     │  │    State     │      │
-│  │    Watcher    │──│   Engine   │──│   Manager    │      │
-│  └───────────────┘  └────────────┘  └──────────────┘      │
-│          │                │                  │              │
-│          └────────────────┼──────────────────┘              │
-│                           │                                 │
-│  ┌────────────────────────┴───────────────────────┐        │
-│  │           Synchronization Layer                │        │
-│  │  ┌─────────┐  ┌─────────┐  ┌──────────┐      │        │
-│  │  │Chunking │  │Compress │  │ Hashing  │      │        │
-│  │  └─────────┘  └─────────┘  └──────────┘      │        │
-│  └────────────────────────────────────────────────┘        │
-│                           │                                 │
-│  ┌────────────────────────┴───────────────────────┐        │
-│  │           Encryption Layer                     │        │
-│  │        (AES-256-GCM + ECDH Key Exchange)       │        │
-│  └────────────────────────────────────────────────┘        │
-│                           │                                 │
-│  ┌────────────────────────┴───────────────────────┐        │
-│  │         Network Transport Layer                │        │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐    │        │
-│  │  │   QUIC   │  │   TCP    │  │  mDNS    │    │        │
-│  │  │(Primary) │  │(Fallback)│  │(Discovery)│    │        │
-│  │  └──────────┘  └──────────┘  └──────────┘    │        │
-│  └────────────────────────────────────────────────┘        │
-│                           │                                 │
-│  ┌────────────────────────┴───────────────────────┐        │
-│  │      Persistence Layer (SQLite + WAL)          │        │
-│  │  - File Metadata    - Operation Log            │        │
-│  │  - Peer Registry    - Chunk Tracking           │        │
-│  └────────────────────────────────────────────────┘        │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Node["P2P Sync Node"]
+        subgraph AppLayer["Application Layer"]
+            FileWatcher["File System<br/>Watcher"]
+            SyncEngine["Sync Engine"]
+            StateManager["State Manager"]
+
+            FileWatcher <--> SyncEngine
+            SyncEngine <--> StateManager
+        end
+
+        subgraph SyncLayer["Synchronization Layer"]
+            Chunking["Chunking"]
+            Compress["Compression"]
+            Hashing["Hashing<br/>(BLAKE3)"]
+        end
+
+        subgraph CryptoLayer["Encryption Layer"]
+            Encryption["AES-256-GCM + ECDH Key Exchange"]
+        end
+
+        subgraph NetworkLayer["Network Transport Layer"]
+            QUIC["QUIC<br/>(Primary)"]
+            TCP["TCP<br/>(Fallback)"]
+            mDNS["mDNS/UDP<br/>(Discovery)"]
+            FlowControl["Flow Control"]
+            ConnMgr["Connection<br/>Manager"]
+        end
+
+        subgraph PersistenceLayer["Persistence Layer"]
+            DB["SQLite + WAL<br/>• File Metadata<br/>• Operation Log<br/>• Peer Registry<br/>• Chunk Tracking"]
+        end
+
+        AppLayer --> SyncLayer
+        SyncLayer --> CryptoLayer
+        CryptoLayer --> NetworkLayer
+        AppLayer <--> PersistenceLayer
+        SyncLayer <--> PersistenceLayer
+    end
+
+    style Node fill:#f9f9f9,stroke:#333,stroke-width:2px
+    style AppLayer fill:#e1f5ff,stroke:#0288d1
+    style SyncLayer fill:#fff3e0,stroke:#f57c00
+    style CryptoLayer fill:#fce4ec,stroke:#c2185b
+    style NetworkLayer fill:#f3e5f5,stroke:#7b1fa2
+    style PersistenceLayer fill:#e8f5e9,stroke:#388e3c
 ```
 
 ### Component Interaction Diagram
 
-```
-┌─────────────┐
-│ File System │
-│   Events    │
-└──────┬──────┘
-       │ fsnotify
-       ▼
-┌─────────────────┐     ┌──────────────┐     ┌─────────────┐
-│  File Watcher   │────▶│ Rename       │────▶│  Database   │
-│                 │     │ Detector     │     │             │
-└────────┬────────┘     └──────────────┘     └─────────────┘
-         │
-         │ File Change Event
-         ▼
-┌─────────────────┐
-│  Sync Engine    │
-│  - Vector Clock │
-│  - Conflict Det │
-└────────┬────────┘
-         │
-         │ Sync Operation
-         ▼
-┌─────────────────┐     ┌──────────────┐     ┌─────────────┐
-│   Chunker       │────▶│  Compressor  │────▶│  Encryptor  │
-└─────────────────┘     └──────────────┘     └──────┬──────┘
-                                                     │
-                                                     │ Encrypted Chunks
-                                                     ▼
-┌─────────────────┐     ┌──────────────┐     ┌─────────────┐
-│  Connection     │◀────│   Network    │◀────│  Transport  │
-│   Manager       │     │  Messenger   │     │  (QUIC/TCP) │
-└─────────────────┘     └──────────────┘     └─────────────┘
-         │
-         │ Peer Discovery
-         ▼
-┌─────────────────┐
-│  mDNS Service   │
-└─────────────────┘
+```mermaid
+flowchart TD
+    FS[File System Events]
+    Watcher[File Watcher<br/>fsnotify]
+    RenameDetector[Rename Detector]
+    DB[(Database)]
+    SyncEngine[Sync Engine<br/>Vector Clock<br/>Conflict Detection]
+    Chunker[Chunker]
+    Compressor[Compressor]
+    Encryptor[Encryptor]
+    Transport[Transport<br/>QUIC/TCP]
+    Messenger[Network Messenger]
+    ConnMgr[Connection Manager]
+    mDNS[mDNS/UDP Service]
+    FlowControl[Flow Control]
+    MsgHandler[Message Handler]
+
+    FS -->|fsnotify events| Watcher
+    Watcher --> RenameDetector
+    RenameDetector --> DB
+    Watcher -->|File Change Event| SyncEngine
+
+    SyncEngine <--> DB
+    SyncEngine -->|Sync Operation| Chunker
+
+    Chunker --> Compressor
+    Compressor --> Encryptor
+
+    Encryptor -->|Encrypted Chunks| Messenger
+    Messenger --> FlowControl
+    FlowControl --> Transport
+
+    Transport -.->|Incoming| MsgHandler
+    MsgHandler --> SyncEngine
+
+    Transport <--> ConnMgr
+    ConnMgr -->|Peer Discovery| mDNS
+
+    style FS fill:#e1f5ff
+    style Watcher fill:#e1f5ff
+    style SyncEngine fill:#fff3e0
+    style DB fill:#e8f5e9
+    style Encryptor fill:#fce4ec
+    style Transport fill:#f3e5f5
+    style mDNS fill:#f3e5f5
 ```
 
 ### Multi-Peer Network Topology
 
-```
-                    ┌─────────────┐
-                    │   Peer A    │
-                    │  (Origin)   │
-                    └──────┬──────┘
-                           │
-            ┌──────────────┼──────────────┐
-            │              │              │
-            ▼              ▼              ▼
-    ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-    │   Peer B    │ │   Peer C    │ │   Peer D    │
-    │             │ │             │ │             │
-    └──────┬──────┘ └──────┬──────┘ └──────┬──────┘
-           │               │               │
-           └───────────────┼───────────────┘
-                           │
-                    Full Mesh Network
-                  (Each peer connects to
-                   all other peers)
+```mermaid
+graph TD
+    A[Peer A<br/>Origin]
+    B[Peer B]
+    C[Peer C]
+    D[Peer D]
+
+    A <--> B
+    A <--> C
+    A <--> D
+    B <--> C
+    B <--> D
+    C <--> D
+
+    note[Full Mesh Network<br/>Each peer connects to all other peers]
+
+    style A fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    style B fill:#e1f5ff,stroke:#0288d1
+    style C fill:#e1f5ff,stroke:#0288d1
+    style D fill:#e1f5ff,stroke:#0288d1
+    style note fill:#f5f5f5,stroke:#999,stroke-dasharray: 5 5
 ```
 
 ---
@@ -353,184 +370,98 @@ Network → GCM Decryption → JSON Decoding → Plaintext
 
 ### File Creation/Update Flow
 
-```
-┌──────────────┐
-│ User creates │
-│  file.txt    │
-└──────┬───────┘
-       │
-       ▼
-┌──────────────────┐
-│  fsnotify event  │
-│   (CREATE)       │
-└──────┬───────────┘
-       │
-       ▼
-┌─────────────────────────┐
-│  File Watcher           │
-│  - Check if remote      │
-│  - Generate file ID     │
-└──────┬──────────────────┘
-       │
-       ▼
-┌─────────────────────────┐
-│  Sync Engine            │
-│  - Increment vector     │
-│    clock                │
-│  - Create SyncOperation │
-│  - Hash file content    │
-└──────┬──────────────────┘
-       │
-       ▼
-┌─────────────────────────┐
-│  Database               │
-│  - Insert file metadata │
-│  - Log operation        │
-└──────┬──────────────────┘
-       │
-       ▼
-┌─────────────────────────┐
-│  Network Messenger      │
-│  - Read file data       │
-│  - Compress if needed   │
-│  - Chunk if >512KB      │
-└──────┬──────────────────┘
-       │
-       ▼
-┌─────────────────────────┐
-│  Encryption Layer       │
-│  - Encrypt chunks       │
-│  - Add auth tags        │
-└──────┬──────────────────┘
-       │
-       ▼
-┌─────────────────────────┐
-│  Transport Layer        │
-│  - Send via QUIC/TCP    │
-│  - Wait for ACK         │
-│  - Retry on failure     │
-└──────┬──────────────────┘
-       │
-       ▼
-┌─────────────────────────┐
-│  Peer receives & stores │
-└─────────────────────────┘
+```mermaid
+flowchart TD
+    User[User creates file.txt]
+    FSNotify[fsnotify event<br/>CREATE]
+    FileWatcher[File Watcher<br/>- Check if remote<br/>- Generate file ID]
+    SyncEngine[Sync Engine<br/>- Increment vector clock<br/>- Create SyncOperation<br/>- Hash file content]
+    Database[Database<br/>- Insert file metadata<br/>- Log operation]
+    Messenger[Network Messenger<br/>- Read file data<br/>- Compress if needed<br/>- Chunk if >512KB]
+    Encryption[Encryption Layer<br/>- Encrypt chunks<br/>- Add auth tags]
+    Transport[Transport Layer<br/>- Send via QUIC/TCP<br/>- Wait for ACK<br/>- Retry on failure]
+    Peer[Peer receives & stores]
+
+    User --> FSNotify
+    FSNotify --> FileWatcher
+    FileWatcher --> SyncEngine
+    SyncEngine --> Database
+    Database --> Messenger
+    Messenger --> Encryption
+    Encryption --> Transport
+    Transport --> Peer
+
+    style User fill:#e1f5ff
+    style FileWatcher fill:#e1f5ff
+    style SyncEngine fill:#fff3e0
+    style Database fill:#e8f5e9
+    style Messenger fill:#f3e5f5
+    style Encryption fill:#fce4ec
+    style Transport fill:#f3e5f5
+    style Peer fill:#e8f5e9
 ```
 
 ### File Receive Flow
 
-```
-┌──────────────────┐
-│  Network receives│
-│  encrypted msg   │
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────────────┐
-│  Transport Layer         │
-│  - Verify message ID     │
-│  - Check sender          │
-└────────┬─────────────────┘
-         │
-         ▼
-┌──────────────────────────┐
-│  Decryption              │
-│  - Get session key       │
-│  - Decrypt payload       │
-│  - Verify auth tag       │
-└────────┬─────────────────┘
-         │
-         ▼
-┌──────────────────────────┐
-│  Message Handler         │
-│  - Route by type         │
-│  - Decompress if needed  │
-└────────┬─────────────────┘
-         │
-         ▼
-┌──────────────────────────┐
-│  Chunk Assembly          │
-│  - Store chunk           │
-│  - Check if complete     │
-│  - Verify file hash      │
-└────────┬─────────────────┘
-         │
-         ▼
-┌──────────────────────────┐
-│  Sync Engine             │
-│  - Mark as remote source │
-│  - Check for conflicts   │
-└────────┬─────────────────┘
-         │
-         ▼
-┌──────────────────────────┐
-│  File System             │
-│  - Disable watcher       │
-│  - Write atomically      │
-│  - Re-enable watcher     │
-└────────┬─────────────────┘
-         │
-         ▼
-┌──────────────────────────┐
-│  Database Update         │
-│  - Update metadata       │
-│  - Log operation         │
-└────────┬─────────────────┘
-         │
-         ▼
-┌──────────────────────────┐
-│  Send ACK to sender      │
-└──────────────────────────┘
+```mermaid
+flowchart TD
+    Network[Network receives<br/>encrypted msg]
+    Transport[Transport Layer<br/>- Verify message ID<br/>- Check sender]
+    Decryption[Decryption<br/>- Get session key<br/>- Decrypt payload<br/>- Verify auth tag]
+    Handler[Message Handler<br/>- Route by type<br/>- Decompress if needed]
+    ChunkAssembly[Chunk Assembly<br/>- Store chunk<br/>- Check if complete<br/>- Verify file hash]
+    SyncEngine[Sync Engine<br/>- Mark as remote source<br/>- Check for conflicts]
+    FileSystem[File System<br/>- Disable watcher<br/>- Write atomically<br/>- Re-enable watcher]
+    DBUpdate[Database Update<br/>- Update metadata<br/>- Log operation]
+    ACK[Send ACK to sender]
+
+    Network --> Transport
+    Transport --> Decryption
+    Decryption --> Handler
+    Handler --> ChunkAssembly
+    ChunkAssembly --> SyncEngine
+    SyncEngine --> FileSystem
+    FileSystem --> DBUpdate
+    DBUpdate --> ACK
+
+    style Network fill:#f3e5f5
+    style Transport fill:#f3e5f5
+    style Decryption fill:#fce4ec
+    style Handler fill:#f3e5f5
+    style ChunkAssembly fill:#fff3e0
+    style SyncEngine fill:#fff3e0
+    style FileSystem fill:#e1f5ff
+    style DBUpdate fill:#e8f5e9
+    style ACK fill:#f3e5f5
 ```
 
 ### Conflict Resolution Flow
 
-```
-┌───────────────────┐
-│  Two peers edit   │
-│  same file        │
-└─────────┬─────────┘
-          │
-          ▼
-┌───────────────────────────┐
-│  Vector Clock Comparison  │
-│  - Peer A: {A:5, B:3}    │
-│  - Peer B: {A:4, B:6}    │
-│  → Concurrent!            │
-└─────────┬─────────────────┘
-          │
-          ▼
-┌───────────────────────────┐
-│  Conflict Detection       │
-│  - Same file ID           │
-│  - Different checksums    │
-│  - Concurrent clocks      │
-└─────────┬─────────────────┘
-          │
-          ▼
-┌───────────────────────────┐
-│  Is Text File?            │
-└─────────┬─────────────────┘
-          │
-    ┌─────┴─────┐
-    │           │
-   Yes         No
-    │           │
-    ▼           ▼
-┌───────────┐ ┌──────────────┐
-│ 3-Way     │ │ Last Write   │
-│ Merge     │ │ Wins (LWW)   │
-└─────┬─────┘ └──────┬───────┘
-      │              │
-      └──────┬───────┘
-             │
-             ▼
-┌───────────────────────────┐
-│  Apply Resolution         │
-│  - Update file            │
-│  - Merge vector clocks    │
-│  - Broadcast result       │
-└───────────────────────────┘
+```mermaid
+flowchart TD
+    Start[Two peers edit<br/>same file]
+    VectorClock[Vector Clock Comparison<br/>Peer A: &#123;A:5, B:3&#125;<br/>Peer B: &#123;A:4, B:6&#125;<br/>→ Concurrent!]
+    Detection[Conflict Detection<br/>- Same file ID<br/>- Different checksums<br/>- Concurrent clocks]
+    IsText{Is Text File?}
+    ThreeWay[3-Way Merge]
+    LWW[Last Write Wins<br/>LWW]
+    Apply[Apply Resolution<br/>- Update file<br/>- Merge vector clocks<br/>- Broadcast result]
+
+    Start --> VectorClock
+    VectorClock --> Detection
+    Detection --> IsText
+    IsText -->|Yes| ThreeWay
+    IsText -->|No| LWW
+    ThreeWay --> Apply
+    LWW --> Apply
+
+    style Start fill:#e1f5ff
+    style VectorClock fill:#fff3e0
+    style Detection fill:#fff3e0
+    style IsText fill:#fff9c4
+    style ThreeWay fill:#f3e5f5
+    style LWW fill:#f3e5f5
+    style Apply fill:#e8f5e9
 ```
 
 ---
@@ -540,84 +471,72 @@ Network → GCM Decryption → JSON Decoding → Plaintext
 ### Message Types and Flow
 
 #### Discovery and Connection
-```
-Peer A                          Peer B
-  │                               │
-  │─────── discovery ────────────▶│
-  │                               │
-  │◀──── discovery_response ──────│
-  │                               │
-  │─────── handshake ────────────▶│
-  │      (ECDH public key)        │
-  │                               │
-  │◀───── handshake_ack ──────────│
-  │    (ECDH public key)          │
-  │                               │
-  │─── handshake_complete ───────▶│
-  │                               │
-  [Session keys established]
-  │                               │
-  │──── state_declaration ───────▶│
-  │   (file manifest)             │
-  │                               │
-  │◀─── state_declaration ────────│
-  │   (file manifest)             │
-  │                               │
-  [Synchronization begins]
+
+```mermaid
+sequenceDiagram
+    participant A as Peer A
+    participant B as Peer B
+
+    A->>B: discovery
+    B->>A: discovery_response
+
+    A->>B: handshake (ECDH public key)
+    B->>A: handshake_ack (ECDH public key)
+    A->>B: handshake_complete
+
+    Note over A,B: Session keys established
+
+    A->>B: state_declaration (file manifest)
+    B->>A: state_declaration (file manifest)
+
+    Note over A,B: Synchronization begins
 ```
 
 #### File Synchronization
-```
-Peer A (Sender)                 Peer B (Receiver)
-  │                               │
-  │──── sync_operation ──────────▶│
-  │  (metadata, small file data)  │
-  │                               │
-  │◀──── operation_ack ───────────│
-  │         (success)             │
-  │                               │
-  [For large files:]
-  │                               │
-  │────── chunk (0) ─────────────▶│
-  │────── chunk (1) ─────────────▶│
-  │────── chunk (2) ─────────────▶│
-  │────── chunk (n) ─────────────▶│
-  │                               │
-  │◀───── chunk_ack ──────────────│
-  │◀───── chunk_ack ──────────────│
-  │◀───── chunk_ack ──────────────│
-  │◀───── chunk_ack ──────────────│
-  │                               │
-  [File assembled and verified]
+
+```mermaid
+sequenceDiagram
+    participant A as Peer A (Sender)
+    participant B as Peer B (Receiver)
+
+    A->>B: sync_operation (metadata, small file data)
+    B->>A: operation_ack (success)
+
+    Note over A,B: For large files:
+
+    A->>B: chunk (0)
+    A->>B: chunk (1)
+    A->>B: chunk (2)
+    A->>B: chunk (n)
+
+    B->>A: chunk_ack
+    B->>A: chunk_ack
+    B->>A: chunk_ack
+    B->>A: chunk_ack
+
+    Note over A,B: File assembled and verified
 ```
 
 ### Protocol Layers
 
-```
-┌─────────────────────────────────────┐
-│  Application Layer                  │
-│  (SyncOperation, FileRequest, etc)  │
-└────────────┬────────────────────────┘
-             │
-┌────────────▼────────────────────────┐
-│  Message Layer                      │
-│  (Message serialization, routing)   │
-└────────────┬────────────────────────┘
-             │
-┌────────────▼────────────────────────┐
-│  Encryption Layer                   │
-│  (AES-256-GCM)                      │
-└────────────┬────────────────────────┘
-             │
-┌────────────▼────────────────────────┐
-│  Transport Layer                    │
-│  (QUIC primary, TCP fallback)       │
-└────────────┬────────────────────────┘
-             │
-┌────────────▼────────────────────────┐
-│  Network Layer                      │
-│  (UDP/TCP, IP)                      │
-└─────────────────────────────────────┘
+```mermaid
+flowchart TD
+    App[Application Layer<br/>SyncOperation, FileRequest, etc]
+    Msg[Message Layer<br/>Message serialization, routing]
+    Enc[Encryption Layer<br/>AES-256-GCM]
+    Trans[Transport Layer<br/>QUIC primary, TCP fallback]
+    Net[Network Layer<br/>UDP/TCP, IP]
+
+    App --> Msg
+    Msg --> Enc
+    Enc --> Trans
+    Trans --> Net
+
+    style App fill:#fff3e0,stroke:#f57c00
+    style Msg fill:#e1f5ff,stroke:#0288d1
+    style Enc fill:#fce4ec,stroke:#c2185b
+    style Trans fill:#f3e5f5,stroke:#7b1fa2
+    style Net fill:#e8f5e9,stroke:#388e3c
 ```
 
 ---
@@ -626,37 +545,52 @@ Peer A (Sender)                 Peer B (Receiver)
 
 ### Database Design
 
-```
-┌─────────────────────────────────────────────────┐
-│              SQLite Database                    │
-│              (WAL Mode Enabled)                 │
-├─────────────────────────────────────────────────┤
-│                                                 │
-│  ┌──────────────┐       ┌──────────────┐      │
-│  │    files     │       │  operations  │      │
-│  ├──────────────┤       ├──────────────┤      │
-│  │ file_id (PK) │       │ sequence (PK)│      │
-│  │ path         │       │ operation_id │      │
-│  │ checksum     │       │ timestamp    │      │
-│  │ size         │       │ type         │      │
-│  │ mtime        │       │ peer_id      │      │
-│  │ peer_id      │       │ file_id (FK) │      │
-│  │ compressed   │       │ acknowledged │      │
-│  │ original_size│       │ persisted    │      │
-│  └──────────────┘       └──────────────┘      │
-│                                                 │
-│  ┌──────────────┐       ┌──────────────┐      │
-│  │    peers     │       │    chunks    │      │
-│  ├──────────────┤       ├──────────────┤      │
-│  │ peer_id (PK) │       │ file_id (PK) │      │
-│  │ address      │       │ chunk_id (PK)│      │
-│  │ port         │       │ chunk_hash   │      │
-│  │ session_key  │       │ offset       │      │
-│  │ last_seen    │       │ length       │      │
-│  │ state        │       │ received     │      │
-│  └──────────────┘       └──────────────┘      │
-│                                                 │
-└─────────────────────────────────────────────────┘
+**SQLite Database (WAL Mode Enabled)**
+
+```mermaid
+erDiagram
+    files {
+        string file_id PK
+        string path
+        string checksum
+        int size
+        datetime mtime
+        string peer_id
+        bool compressed
+        int original_size
+    }
+
+    operations {
+        int sequence PK
+        string operation_id
+        datetime timestamp
+        string type
+        string peer_id
+        string file_id FK
+        bool acknowledged
+        bool persisted
+    }
+
+    peers {
+        string peer_id PK
+        string address
+        int port
+        string session_key
+        datetime last_seen
+        string state
+    }
+
+    chunks {
+        string file_id PK
+        int chunk_id PK
+        string chunk_hash
+        int offset
+        int length
+        bool received
+    }
+
+    files ||--o{ operations : "tracks"
+    files ||--o{ chunks : "contains"
 ```
 
 ### File System Layout
@@ -697,40 +631,21 @@ Peer A (Sender)                 Peer B (Receiver)
 
 ### Security Layers
 
-```
-┌─────────────────────────────────────────────────┐
-│           Security Architecture                 │
-├─────────────────────────────────────────────────┤
-│                                                 │
-│  ┌──────────────────────────────────────┐      │
-│  │   Authentication Layer               │      │
-│  │   - Pre-shared keys                  │      │
-│  │   - Certificate-based (optional)     │      │
-│  │   - Trust-on-first-use (TOFU)        │      │
-│  └────────────┬─────────────────────────┘      │
-│               │                                 │
-│  ┌────────────▼─────────────────────────┐      │
-│  │   Key Exchange Layer                 │      │
-│  │   - ECDH with Curve25519             │      │
-│  │   - HKDF-SHA256 key derivation       │      │
-│  │   - 24-hour key rotation             │      │
-│  └────────────┬─────────────────────────┘      │
-│               │                                 │
-│  ┌────────────▼─────────────────────────┐      │
-│  │   Encryption Layer                   │      │
-│  │   - AES-256-GCM                      │      │
-│  │   - Per-message random IV            │      │
-│  │   - Authenticated encryption         │      │
-│  └────────────┬─────────────────────────┘      │
-│               │                                 │
-│  ┌────────────▼─────────────────────────┐      │
-│  │   Integrity Layer                    │      │
-│  │   - BLAKE3 content hashing           │      │
-│  │   - Chunk-level verification         │      │
-│  │   - File-level verification          │      │
-│  └──────────────────────────────────────┘      │
-│                                                 │
-└─────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    Auth[Authentication Layer<br/>- Pre-shared keys<br/>- Certificate-based optional<br/>- Trust-on-first-use TOFU]
+    KeyExchange[Key Exchange Layer<br/>- ECDH with Curve25519<br/>- HKDF-SHA256 key derivation<br/>- 24-hour key rotation]
+    Encryption[Encryption Layer<br/>- AES-256-GCM<br/>- Per-message random IV<br/>- Authenticated encryption]
+    Integrity[Integrity Layer<br/>- BLAKE3 content hashing<br/>- Chunk-level verification<br/>- File-level verification]
+
+    Auth --> KeyExchange
+    KeyExchange --> Encryption
+    Encryption --> Integrity
+
+    style Auth fill:#e1f5ff,stroke:#0288d1,stroke-width:2px
+    style KeyExchange fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    style Encryption fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    style Integrity fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
 ```
 
 ---
