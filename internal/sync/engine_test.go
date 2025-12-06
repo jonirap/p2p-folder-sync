@@ -155,6 +155,9 @@ func TestHandleDelete_UntrackedFile(t *testing.T) {
 	// Manually call handleDelete for this untracked file
 	engine.handleDelete(untrackedFilePath)
 
+	// Wait for the goroutine to complete broadcasting
+	time.Sleep(100 * time.Millisecond)
+
 	// Check if BroadcastOperation was called on the messenger
 	messenger.mu.Lock()
 	defer messenger.mu.Unlock()

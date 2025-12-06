@@ -98,7 +98,7 @@ func TestWatcher_WatchPath_Reenable(t *testing.T) {
 		t.Fatalf("Failed to modify test file: %v", err)
 	}
 
-	// Wait for the event
+	// Wait for the event (accounting for 500ms debounce time)
 	select {
 	case event := <-watcher.Events():
 		if event.Path != testFile {
@@ -107,7 +107,7 @@ func TestWatcher_WatchPath_Reenable(t *testing.T) {
 		if event.Operation != "update" {
 			t.Errorf("Expected update operation, got %s", event.Operation)
 		}
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(1000 * time.Millisecond):
 		t.Error("Expected event after re-enabling path, but none received")
 	}
 }
@@ -191,7 +191,7 @@ func TestWatcher_IgnoreThenWatch(t *testing.T) {
 		t.Fatalf("Failed to modify file after watch re-enabled: %v", err)
 	}
 
-	// Should receive event for the modification
+	// Should receive event for the modification (accounting for 500ms debounce time)
 	select {
 	case event := <-watcher.Events():
 		if event.Path != testFile {
@@ -200,7 +200,7 @@ func TestWatcher_IgnoreThenWatch(t *testing.T) {
 		if event.Operation != "update" {
 			t.Errorf("Expected update operation, got %s", event.Operation)
 		}
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(1000 * time.Millisecond):
 		t.Error("Expected event after re-enabling watch, but none received")
 	}
 }
@@ -319,7 +319,7 @@ func TestWatcher_IgnorePathDuringRemoteOperation(t *testing.T) {
 		t.Fatalf("Failed to modify file after watch re-enabled: %v", err)
 	}
 
-	// Should receive event for local modification
+	// Should receive event for local modification (accounting for 500ms debounce time)
 	select {
 	case event := <-watcher.Events():
 		if event.Path != testFile {
@@ -328,7 +328,7 @@ func TestWatcher_IgnorePathDuringRemoteOperation(t *testing.T) {
 		if event.Operation != "update" {
 			t.Errorf("Expected update operation, got %s", event.Operation)
 		}
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(1000 * time.Millisecond):
 		t.Error("Expected event for local modification after remote operation")
 	}
 }
@@ -370,7 +370,8 @@ func TestWatcher_MultipleIgnorePatterns(t *testing.T) {
 		}
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	// Wait for debounced events (accounting for 500ms debounce time)
+	time.Sleep(600 * time.Millisecond)
 
 	// Check events - only the non-ignored file should generate an event
 	eventCount := 0
@@ -390,8 +391,12 @@ events:
 		}
 	}
 
-	if eventCount != 2 {
-		t.Errorf("Expected exactly 2 events (create and update for watched file), got %d", eventCount)
+	// With debouncing, CREATE and WRITE events may be coalesced into 1 event
+	if eventCount < 1 {
+		t.Errorf("Expected at least 1 event for watched file, got %d", eventCount)
+	}
+	if eventCount > 2 {
+		t.Errorf("Expected at most 2 events for watched file, got %d", eventCount)
 	}
 }
 

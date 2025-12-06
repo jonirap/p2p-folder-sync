@@ -200,12 +200,22 @@ func TestSendFile_SmallFile(t *testing.T) {
 
 	// Mock acknowledgment response
 	go func() {
-		time.Sleep(10 * time.Millisecond)
-		// Simulate receiving acknowledgment
+		// Wait for the message to be sent
+		time.Sleep(50 * time.Millisecond)
+
+		// Get the sent message to extract its ID for correlation
+		sentMsgs := transport.GetSentMessages(peerID)
+		if len(sentMsgs) == 0 {
+			return
+		}
+		lastMsg := sentMsgs[len(sentMsgs)-1]
+
+		// Simulate receiving acknowledgment with CorrelationID
 		ackMsg := &messages.Message{
-			ID:       messages.GenerateMessageID(),
-			Type:     messages.TypeOperationAck,
-			SenderID: peerID,
+			ID:            messages.GenerateMessageID(),
+			Type:          messages.TypeOperationAck,
+			SenderID:      peerID,
+			CorrelationID: &lastMsg.ID,
 			Payload: &messages.OperationAckMessage{
 				OperationID: metadata.ID,
 				Success:     true,
@@ -300,12 +310,25 @@ func TestSendFile_WithCompression(t *testing.T) {
 
 	// Mock acknowledgment
 	go func() {
-		time.Sleep(10 * time.Millisecond)
+		// Wait for the message to be sent
+		time.Sleep(50 * time.Millisecond)
+
+		// Get the sent message to extract its ID for correlation
+		sentMsgs := transport.GetSentMessages(peerID)
+		if len(sentMsgs) == 0 {
+			return
+		}
+		lastMsg := sentMsgs[len(sentMsgs)-1]
+
 		ackMsg := &messages.Message{
-			ID:       messages.GenerateMessageID(),
-			Type:     messages.TypeOperationAck,
-			SenderID: peerID,
-			Payload:  &messages.OperationAckMessage{Success: true},
+			ID:            messages.GenerateMessageID(),
+			Type:          messages.TypeOperationAck,
+			SenderID:      peerID,
+			CorrelationID: &lastMsg.ID,
+			Payload: &messages.OperationAckMessage{
+				OperationID: metadata.ID,
+				Success:     true,
+			},
 		}
 		if transport.messageHandler != nil {
 			transport.messageHandler.HandleMessage(ackMsg)
@@ -561,14 +584,19 @@ func TestToByteSlice_Conversions(t *testing.T) {
 		{
 			name: "direct byte slice",
 			setupMsg: func() *messages.Message {
-				payload := &messages.OperationAckMessage{Success: true}
+				payload := &messages.OperationAckMessage{
+					OperationID: "op-1",
+					Success:     true,
+				}
 				payloadData, _ := messages.EncodePayload(payload)
 				encryptedPayload, _ := crypto.Encrypt(payloadData, sessionKey)
+				correlationID := "msg-original"
 				return &messages.Message{
-					ID:       "msg-1",
-					Type:     messages.TypeOperationAck,
-					SenderID: peerID,
-					Payload:  encryptedPayload,
+					ID:            "msg-1",
+					Type:          messages.TypeOperationAck,
+					SenderID:      peerID,
+					CorrelationID: &correlationID,
+					Payload:       encryptedPayload,
 				}
 			},
 			expectError: false,
@@ -611,12 +639,26 @@ func TestMessageRetry(t *testing.T) {
 
 	// Mock acknowledgment after retry
 	go func() {
-		time.Sleep(100 * time.Millisecond)
+		// Wait for retry to happen and message to be sent
+		// First attempt fails immediately, then retry after 1 second
+		time.Sleep(1500 * time.Millisecond)
+
+		// Get the sent message to extract its ID for correlation
+		sentMsgs := transport.GetSentMessages(peerID)
+		if len(sentMsgs) == 0 {
+			return
+		}
+		lastMsg := sentMsgs[len(sentMsgs)-1]
+
 		ackMsg := &messages.Message{
-			ID:       messages.GenerateMessageID(),
-			Type:     messages.TypeOperationAck,
-			SenderID: peerID,
-			Payload:  &messages.OperationAckMessage{Success: true},
+			ID:            messages.GenerateMessageID(),
+			Type:          messages.TypeOperationAck,
+			SenderID:      peerID,
+			CorrelationID: &lastMsg.ID,
+			Payload: &messages.OperationAckMessage{
+				OperationID: metadata.ID,
+				Success:     true,
+			},
 		}
 		if transport.messageHandler != nil {
 			transport.messageHandler.HandleMessage(ackMsg)

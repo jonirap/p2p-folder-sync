@@ -220,8 +220,11 @@ func (w *Watcher) debounceEvent(event FileEvent) {
 	if entry, exists := w.pendingEvents[event.Path]; exists {
 		// Stop the existing timer
 		entry.timer.Stop()
-		// Update the event (keep the latest operation)
-		entry.event = event
+		// Update the event, but prioritize "create" operations
+		// If we already have a create event, don't override it with update
+		if entry.event.Operation != "create" {
+			entry.event = event
+		}
 		// Reset the timer
 		entry.timer = time.AfterFunc(w.debounceTime, func() {
 			w.sendDebouncedEvent(event.Path)
