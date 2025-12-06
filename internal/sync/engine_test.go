@@ -176,3 +176,129 @@ func TestHandleDelete_UntrackedFile(t *testing.T) {
 		t.Error("Expected a FileID to be generated, but it was empty")
 	}
 }
+
+// TestEngineVectorClockIncrement validates that the engine's vector clock is
+// incremented when local operations are queued
+func TestEngineVectorClockIncrement(t *testing.T) {
+	engine, cleanup := setupTestEngine(t)
+	defer cleanup()
+
+	// Create first local operation
+	op1 := NewSyncOperation(OpCreate, "file1.txt", "file-id-1", "test-peer")
+	op1.Checksum = "checksum1"
+	op1.Size = 100
+
+	// Queue the operation
+	engine.queueOperation(op1)
+
+	// Verify vector clock was set and incremented
+	if op1.VectorClock == nil {
+		t.Fatal("Operation vector clock should not be nil after queueing")
+	}
+	if op1.VectorClock["test-peer"] != 1 {
+		t.Errorf("Expected vector clock['test-peer'] = 1, got %d", op1.VectorClock["test-peer"])
+	}
+
+	// Create second local operation
+	op2 := NewSyncOperation(OpUpdate, "file1.txt", "file-id-1", "test-peer")
+	op2.Checksum = "checksum2"
+	op2.Size = 150
+
+	// Queue the second operation
+	engine.queueOperation(op2)
+
+	// Verify vector clock was incremented
+	if op2.VectorClock["test-peer"] != 2 {
+		t.Errorf("Expected vector clock['test-peer'] = 2, got %d", op2.VectorClock["test-peer"])
+	}
+
+	// Verify operations have causal relationship (not concurrent)
+	if op1.VectorClock.IsConcurrent(op2.VectorClock) {
+		t.Error("Sequential operations should NOT be concurrent")
+	}
+
+	// Verify op1 < op2
+	if op1.VectorClock.Compare(op2.VectorClock) != -1 {
+		t.Errorf("Expected op1 < op2, got comparison = %d", op1.VectorClock.Compare(op2.VectorClock))
+	}
+}
+
+// TestEngineVectorClockMergeRemote validates that remote vector clocks are
+// merged when processing incoming operations
+func TestEngineVectorClockMergeRemote(t *testing.T) {
+	engine, cleanup := setupTestEngine(t)
+	defer cleanup()
+
+	// Create a remote operation with its own vector clock
+	remoteOp := NewSyncOperation(OpCreate, "remote-file.txt", "remote-file-id", "remote-peer")
+	remoteOp.Checksum = "remote-checksum"
+	remoteOp.Size = 200
+	remoteOp.Source = "remote"
+
+	// Set remote vector clock
+	remoteOp.VectorClock = NewVectorClock()
+	remoteOp.VectorClock.Set("remote-peer", 5)
+
+	// Process the remote operation
+	remoteData := []byte("remote file content")
+	engine.HandleIncomingFile(remoteData, remoteOp)
+
+	// Wait a bit for async processing
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify engine's vector clock was merged
+	engine.vectorClockMu.Lock()
+	engineVC := engine.vectorClock
+	engine.vectorClockMu.Unlock()
+
+	if engineVC["remote-peer"] != 5 {
+		t.Errorf("Expected engine vector clock['remote-peer'] = 5, got %d", engineVC["remote-peer"])
+	}
+
+	// Now create a local operation and verify it has both clocks
+	localOp := NewSyncOperation(OpCreate, "local-file.txt", "local-file-id", "test-peer")
+	localOp.Checksum = "local-checksum"
+	localOp.Size = 100
+
+	engine.queueOperation(localOp)
+
+	// Verify local operation has both peer clocks
+	if localOp.VectorClock["test-peer"] != 1 {
+		t.Errorf("Expected local operation vector clock['test-peer'] = 1, got %d", localOp.VectorClock["test-peer"])
+	}
+	if localOp.VectorClock["remote-peer"] != 5 {
+		t.Errorf("Expected local operation vector clock['remote-peer'] = 5 (from merge), got %d", localOp.VectorClock["remote-peer"])
+	}
+}
+
+// TestNoConflictForSequentialEdits validates that sequential edits (non-concurrent)
+// do not trigger conflict markers in files
+func TestNoConflictForSequentialEdits(t *testing.T) {
+	// This test validates that:
+	// 1. When an operation has VC {peer-a: 1}
+	// 2. And a later operation has VC {peer-a: 1, peer-b: 1}
+	// 3. They are NOT concurrent (because peer-b includes peer-a's state)
+	// 4. No conflict markers should be written
+
+	// Simulate peer-a's first operation
+	vc1 := NewVectorClock()
+	vc1.Set("peer-a", 1)
+
+	// Simulate peer-b's operation after receiving peer-a's
+	vc2 := NewVectorClock()
+	vc2.Set("peer-a", 1) // peer-b has seen peer-a's operation
+	vc2.Set("peer-b", 1) // peer-b makes its own edit
+
+	// Verify NOT concurrent
+	if vc1.IsConcurrent(vc2) {
+		t.Error("VC {peer-a:1} and VC {peer-a:1, peer-b:1} should NOT be concurrent")
+		t.Errorf("vc1: %v", vc1)
+		t.Errorf("vc2: %v", vc2)
+	}
+
+	// Verify causal relationship: vc1 < vc2
+	comparison := vc1.Compare(vc2)
+	if comparison != -1 {
+		t.Errorf("Expected vc1 < vc2 (comparison = -1), got %d", comparison)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -19,12 +20,20 @@ type FileEvent struct {
 
 // Watcher watches for file system changes
 type Watcher struct {
-	watcher   *fsnotify.Watcher
-	events    chan FileEvent
-	errors    chan error
-	ignoreMap map[string]bool
-	mu        sync.RWMutex
-	closed    bool
+	watcher      *fsnotify.Watcher
+	events       chan FileEvent
+	errors       chan error
+	ignoreMap    map[string]bool
+	mu           sync.RWMutex
+	closed       bool
+	debounceTime time.Duration
+	pendingEvents map[string]*debounceEntry
+	debounceMu    sync.Mutex
+}
+
+type debounceEntry struct {
+	event FileEvent
+	timer *time.Timer
 }
 
 // NewWatcher creates a new file system watcher
@@ -35,10 +44,12 @@ func NewWatcher() (*Watcher, error) {
 	}
 
 	w := &Watcher{
-		watcher:   fsWatcher,
-		events:    make(chan FileEvent, 100),
-		errors:    make(chan error, 10),
-		ignoreMap: make(map[string]bool),
+		watcher:       fsWatcher,
+		events:        make(chan FileEvent, 100),
+		errors:        make(chan error, 10),
+		ignoreMap:     make(map[string]bool),
+		debounceTime:  500 * time.Millisecond, // 500ms debounce
+		pendingEvents: make(map[string]*debounceEntry),
 	}
 
 	go w.processEvents()
@@ -118,6 +129,15 @@ func (w *Watcher) Close() error {
 	}
 
 	w.closed = true
+
+	// Cancel all pending debounce timers
+	w.debounceMu.Lock()
+	for _, entry := range w.pendingEvents {
+		entry.timer.Stop()
+	}
+	w.pendingEvents = make(map[string]*debounceEntry)
+	w.debounceMu.Unlock()
+
 	close(w.events)
 	close(w.errors)
 	return w.watcher.Close()
@@ -170,15 +190,12 @@ func (w *Watcher) processEvents() {
 			w.mu.RUnlock()
 
 			if !closed {
-				select {
-				case w.events <- FileEvent{
+				// Debounce the event
+				w.debounceEvent(FileEvent{
 					Path:      event.Name,
 					Op:        event.Op,
 					Operation: operation,
-				}:
-				default:
-					// Channel full, drop event (shouldn't happen with buffered channel)
-				}
+				})
 			}
 
 		case err, ok := <-w.watcher.Errors:
@@ -190,6 +207,59 @@ func (w *Watcher) processEvents() {
 			default:
 				// Channel full, drop error
 			}
+		}
+	}
+}
+
+// debounceEvent debounces file events to prevent rapid-fire updates
+func (w *Watcher) debounceEvent(event FileEvent) {
+	w.debounceMu.Lock()
+	defer w.debounceMu.Unlock()
+
+	// Check if there's already a pending event for this path
+	if entry, exists := w.pendingEvents[event.Path]; exists {
+		// Stop the existing timer
+		entry.timer.Stop()
+		// Update the event (keep the latest operation)
+		entry.event = event
+		// Reset the timer
+		entry.timer = time.AfterFunc(w.debounceTime, func() {
+			w.sendDebouncedEvent(event.Path)
+		})
+	} else {
+		// Create new debounce entry
+		timer := time.AfterFunc(w.debounceTime, func() {
+			w.sendDebouncedEvent(event.Path)
+		})
+		w.pendingEvents[event.Path] = &debounceEntry{
+			event: event,
+			timer: timer,
+		}
+	}
+}
+
+// sendDebouncedEvent sends the debounced event after the timer expires
+func (w *Watcher) sendDebouncedEvent(path string) {
+	w.debounceMu.Lock()
+	entry, exists := w.pendingEvents[path]
+	if !exists {
+		w.debounceMu.Unlock()
+		return
+	}
+	event := entry.event
+	delete(w.pendingEvents, path)
+	w.debounceMu.Unlock()
+
+	// Send the event
+	w.mu.RLock()
+	closed := w.closed
+	w.mu.RUnlock()
+
+	if !closed {
+		select {
+		case w.events <- event:
+		default:
+			// Channel full, drop event
 		}
 	}
 }

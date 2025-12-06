@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"maps"
 	"context"
 	"fmt"
 	"log"
@@ -38,6 +39,9 @@ type Engine struct {
 	stopCh           chan struct{}
 	stopped          bool
 	stopMu           sync.Mutex
+	// Vector clock for tracking causal relationships
+	vectorClock   VectorClock
+	vectorClockMu sync.Mutex
 	// Cache of recently written file paths to avoid re-broadcasting
 	recentWrites    map[string]time.Time // path -> timestamp
 	recentWritesMu  sync.RWMutex
@@ -70,6 +74,7 @@ func NewEngineWithMessenger(cfg *config.Config, db *database.DB, peerID string, 
 		operationQueue:   NewOperationQueue(),
 		peerID:           peerID,
 		stopCh:           make(chan struct{}),
+		vectorClock:      NewVectorClock(),
 		recentWrites:     make(map[string]time.Time),
 		recentWritesTTL:  5 * time.Second, // Keep paths for 5 seconds
 		asyncSem:         make(chan struct{}, 10), // Limit to 10 concurrent async operations
@@ -212,6 +217,13 @@ func (e *Engine) HandleIncomingFile(fileData []byte, metadata *SyncOperation) er
 
 // processIncomingFileAsync processes an incoming file in the background
 func (e *Engine) processIncomingFileAsync(fileData []byte, metadata *SyncOperation) {
+	// Merge remote vector clock with local vector clock
+	if metadata.VectorClock != nil {
+		e.vectorClockMu.Lock()
+		e.vectorClock.Merge(metadata.VectorClock)
+		e.vectorClockMu.Unlock()
+	}
+
 	// Convert relative path to absolute path
 	absPath := filepath.Join(e.config.Sync.FolderPath, metadata.Path)
 	var err error
@@ -767,6 +779,16 @@ func (e *Engine) handleRename(path string) {
 
 // queueOperation queues an operation for processing and stores it in the database
 func (e *Engine) queueOperation(op *SyncOperation) {
+	// Increment vector clock for local operations and copy to operation
+	if op.Source == "local" {
+		e.vectorClockMu.Lock()
+		e.vectorClock.Increment(e.peerID)
+		// Create a copy of the vector clock for this operation
+		op.VectorClock = make(VectorClock)
+		maps.Copy(op.VectorClock, e.vectorClock)
+		e.vectorClockMu.Unlock()
+	}
+
 	// Add to file-specific queue
 	e.operationQueue.Enqueue(op.FileID, op)
 

@@ -38,6 +38,7 @@ type SyncOperation struct {
 	Compressed           *bool       `json:"compressed,omitempty"`
 	OriginalSize         *int64       `json:"original_size,omitempty"`
 	CompressionAlgorithm *string      `json:"compression_algorithm,omitempty"`
+	CompressionLevel     *int        `json:"compression_level,omitempty"`
 }
 
 // NewSyncOperation creates a new sync operation

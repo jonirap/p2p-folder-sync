@@ -15,6 +15,7 @@ import (
 	"github.com/p2p-folder-sync/p2p-sync/internal/compression"
 	"github.com/p2p-folder-sync/p2p-sync/internal/config"
 	"github.com/p2p-folder-sync/p2p-sync/internal/crypto"
+	"github.com/p2p-folder-sync/p2p-sync/internal/hashing"
 	"github.com/p2p-folder-sync/p2p-sync/internal/network/connection"
 	"github.com/p2p-folder-sync/p2p-sync/internal/network/flowcontrol"
 	"github.com/p2p-folder-sync/p2p-sync/internal/network/messages"
@@ -105,6 +106,10 @@ func (nm *NetworkMessenger) SendFile(peerID string, fileData []byte, metadata *s
 		return fmt.Errorf("no session key for peer: %s", peerID)
 	}
 
+	// Check if we need to chunk the file BEFORE compression
+	// This ensures that large files are chunked even if they compress well
+	needsChunking := int64(len(fileData)) > nm.config.Sync.ChunkSizeDefault
+
 	// Apply compression if enabled and file is large enough
 	var compressedData []byte
 	var compressed bool
@@ -119,14 +124,15 @@ func (nm *NetworkMessenger) SendFile(peerID string, fileData []byte, metadata *s
 		metadata.Compressed = &compressed
 		metadata.OriginalSize = &[]int64{int64(len(fileData))}[0]
 		metadata.CompressionAlgorithm = &nm.config.Compression.Algorithm
+		metadata.CompressionLevel = &[]int{nm.config.Compression.Level}[0]
 	} else {
 		compressedData = fileData
 		compressed = false
 		metadata.Compressed = &compressed
 	}
 
-	// Check if we need to chunk the file
-	if int64(len(compressedData)) > nm.config.Sync.ChunkSizeDefault {
+	// Send as chunks if needed (based on original file size)
+	if needsChunking {
 		log.Printf("DEBUG [SendFile]: Sending chunked file to %s", peerID)
 		return nm.sendChunkedFile(peerID, compressedData, metadata)
 	}
@@ -140,6 +146,10 @@ func (nm *NetworkMessenger) SendFile(peerID string, fileData []byte, metadata *s
 
 // sendChunkedFile sends a large file as multiple chunks
 func (nm *NetworkMessenger) sendChunkedFile(peerID string, fileData []byte, metadata *syncpkg.SyncOperation) error {
+	// Calculate hash of the data being chunked (could be compressed)
+	// This is used for chunk assembly verification
+	chunkDataHash := hashing.HashString(fileData)
+
 	// Create chunks
 	chunks, err := nm.chunker.ChunkFile(metadata.FileID, fileData)
 	if err != nil {
@@ -164,7 +174,7 @@ func (nm *NetworkMessenger) sendChunkedFile(peerID string, fileData []byte, meta
 			metadata.PeerID,
 			messages.ChunkMessage{
 				FileID:      chunk.FileID,
-				FileHash:    metadata.Checksum,
+				FileHash:    chunkDataHash, // Use hash of chunked data, not original file
 				ChunkID:     chunk.ChunkID,
 				TotalChunks: chunk.TotalChunks,
 				Offset:      chunk.Offset,

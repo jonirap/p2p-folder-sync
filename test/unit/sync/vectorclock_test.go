@@ -48,3 +48,32 @@ func TestVectorClockCompare(t *testing.T) {
 		t.Errorf("Expected -1 (less), got %d", result)
 	}
 }
+
+func TestVectorClockIsConcurrent(t *testing.T) {
+	// Test that empty vector clocks are concurrent
+	vc1 := sync.NewVectorClock()
+	vc2 := sync.NewVectorClock()
+
+	if !vc1.IsConcurrent(vc2) {
+		t.Error("Two empty vector clocks should be concurrent")
+	}
+
+	// Test that sequential edits are NOT concurrent
+	vc1.Increment("peer1")       // vc1 = {peer1: 1}
+	vc2.Set("peer1", 1)           // vc2 = {peer1: 1}
+	vc2.Increment("peer1")        // vc2 = {peer1: 2}
+
+	if vc1.IsConcurrent(vc2) {
+		t.Error("vc1={peer1:1} and vc2={peer1:2} should NOT be concurrent (sequential)")
+	}
+
+	// Test that truly concurrent edits ARE concurrent
+	vc3 := sync.NewVectorClock()
+	vc4 := sync.NewVectorClock()
+	vc3.Increment("peer1")  // vc3 = {peer1: 1}
+	vc4.Increment("peer2")  // vc4 = {peer2: 1}
+
+	if !vc3.IsConcurrent(vc4) {
+		t.Error("vc3={peer1:1} and vc4={peer2:1} SHOULD be concurrent")
+	}
+}

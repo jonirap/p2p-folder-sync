@@ -27,7 +27,8 @@ type NetworkMessageHandler struct {
 	syncEngine       *syncpkg.Engine
 	heartbeatManager HeartbeatManager
 	chunkAssembler   *chunking.Assembler
-	assembledChunks  map[string][]*chunking.Chunk // fileID -> chunks
+	assembledChunks  map[string][]*chunking.Chunk    // fileID -> chunks
+	chunkMetadata    map[string]*syncpkg.SyncOperation // fileID -> metadata for chunked files
 	assemblerMu      sync.RWMutex
 	peerID           string
 }
@@ -45,6 +46,7 @@ func NewNetworkMessageHandler(cfg *config.Config, syncEngine *syncpkg.Engine, he
 		heartbeatManager: heartbeatManager,
 		chunkAssembler:   chunking.NewAssembler(),
 		assembledChunks:  make(map[string][]*chunking.Chunk),
+		chunkMetadata:    make(map[string]*syncpkg.SyncOperation),
 		peerID:           peerID,
 	}
 }
@@ -253,15 +255,24 @@ func (h *NetworkMessageHandler) handleSyncOperation(msg *messages.Message) error
 		fmt.Printf("DEBUG [Handler]: File data length: %d bytes\n", len(fileData))
 		if len(fileData) == 0 {
 			// Large file, expect chunks to follow
-			// For now, just acknowledge and wait for chunks
-			fmt.Printf("DEBUG [Handler]: No file data, waiting for chunks\n")
+			// Store metadata for later use when chunks are assembled
+			fmt.Printf("DEBUG [Handler]: No file data, storing metadata for chunks (FileID: %s)\n", syncOp.FileID)
+			h.assemblerMu.Lock()
+			// Clear any existing chunks for this file to prevent mixing versions
+			if h.assembledChunks[syncOp.FileID] != nil {
+				fmt.Printf("DEBUG [Handler]: Clearing %d old chunks for FileID %s (new version arriving)\n",
+					len(h.assembledChunks[syncOp.FileID]), syncOp.FileID)
+				delete(h.assembledChunks, syncOp.FileID)
+			}
+			h.chunkMetadata[syncOp.FileID] = syncOp
+			h.assemblerMu.Unlock()
 			return h.sendAcknowledgment(msg, true, "")
 		}
 
 		// Decompress if needed
 		if syncOp.Compressed != nil && *syncOp.Compressed {
 			fmt.Printf("DEBUG [Handler]: Decompressing file data\n")
-			decompressed, err := h.decompressFileData(fileData, syncOp.CompressionAlgorithm)
+			decompressed, err := h.decompressFileData(fileData, syncOp.CompressionAlgorithm, syncOp.CompressionLevel)
 			if err != nil {
 				return h.sendAcknowledgment(msg, false, fmt.Sprintf("decompression failed: %v", err))
 			}
@@ -337,24 +348,46 @@ func (h *NetworkMessageHandler) handleChunk(msg *messages.Message) error {
 			return h.sendAcknowledgment(msg, false, fmt.Sprintf("file assembly failed: %v", err))
 		}
 
-		// Clean up assembled chunks
+		// Retrieve the stored metadata for this file
 		h.assemblerMu.Lock()
+		storedMetadata, hasMetadata := h.chunkMetadata[payload.FileID]
 		delete(h.assembledChunks, payload.FileID)
+		delete(h.chunkMetadata, payload.FileID)
 		h.assemblerMu.Unlock()
 
-		// Create sync operation for the assembled file
-		syncOp := &syncpkg.SyncOperation{
-			Type:     syncpkg.OpCreate, // Assume create for now
-			Path:     "",               // Path would need to be determined
-			FileID:   payload.FileID,
-			Checksum: payload.FileHash,
-			Size:     int64(len(assembledData)),
-			PeerID:   msg.SenderID,
-			Source:   "remote",
+		// Use stored metadata or create basic operation
+		var syncOp *syncpkg.SyncOperation
+		if hasMetadata {
+			// Use the metadata from the initial sync operation
+			syncOp = storedMetadata
+			syncOp.Size = int64(len(assembledData)) // Update size with assembled data
+		} else {
+			// Fallback: create basic sync operation (shouldn't normally happen)
+			syncOp = &syncpkg.SyncOperation{
+				Type:     syncpkg.OpCreate,
+				Path:     "",
+				FileID:   payload.FileID,
+				Checksum: payload.FileHash,
+				Size:     int64(len(assembledData)),
+				PeerID:   msg.SenderID,
+				Source:   "remote",
+			}
+		}
+
+		// Decompress if needed
+		fileData := assembledData
+		if syncOp.Compressed != nil && *syncOp.Compressed {
+			fmt.Printf("DEBUG [Handler]: Decompressing assembled file data\n")
+			decompressed, err := h.decompressFileData(assembledData, syncOp.CompressionAlgorithm, syncOp.CompressionLevel)
+			if err != nil {
+				return h.sendAcknowledgment(msg, false, fmt.Sprintf("decompression failed: %v", err))
+			}
+			fileData = decompressed
 		}
 
 		// Handle the assembled file
-		if err := h.syncEngine.HandleIncomingFile(assembledData, syncOp); err != nil {
+		fmt.Printf("DEBUG [Handler]: Handling assembled file %s (%d bytes)\n", syncOp.Path, len(fileData))
+		if err := h.syncEngine.HandleIncomingFile(fileData, syncOp); err != nil {
 			return h.sendAcknowledgment(msg, false, fmt.Sprintf("assembled file handling failed: %v", err))
 		}
 	}
@@ -452,13 +485,19 @@ func (h *NetworkMessageHandler) sendAcknowledgment(originalMsg *messages.Message
 }
 
 // decompressFileData decompresses file data using the specified algorithm
-func (h *NetworkMessageHandler) decompressFileData(data []byte, algorithm *string) ([]byte, error) {
+func (h *NetworkMessageHandler) decompressFileData(data []byte, algorithm *string, level *int) ([]byte, error) {
 	if algorithm == nil {
 		return data, nil
 	}
 
+	// Use provided level or default to 3 if not specified
+	compressionLevel := 3
+	if level != nil && *level > 0 {
+		compressionLevel = *level
+	}
+
 	// Create decompressor based on algorithm
-	compressor, err := compression.NewCompressor(*algorithm, 0) // Level doesn't matter for decompression
+	compressor, err := compression.NewCompressor(*algorithm, compressionLevel)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create decompressor: %w", err)
 	}
