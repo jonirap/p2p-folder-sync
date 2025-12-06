@@ -69,6 +69,26 @@ func TestDockerComposeSystem(t *testing.T) {
 
 	// Test 6: Conflict resolution
 	testConflictResolution(t, projectName)
+
+	// Clean up sync data directories to avoid permission issues
+	// Docker containers may have created files as root
+	cleanupSyncData(t, dockerDir)
+}
+
+func cleanupSyncData(t *testing.T, dockerDir string) {
+	dirs := []string{
+		filepath.Join(dockerDir, "sync-data-alpha"),
+		filepath.Join(dockerDir, "sync-data-beta"),
+		filepath.Join(dockerDir, "sync-data-gamma"),
+	}
+
+	for _, dir := range dirs {
+		// Use sudo to remove directories that may have root-owned files
+		cmd := exec.Command("sudo", "rm", "-rf", dir)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Logf("Warning: failed to clean up %s: %v (output: %s)", dir, err, output)
+		}
+	}
 }
 
 func copyDockerFiles(t *testing.T, destDir string) {
