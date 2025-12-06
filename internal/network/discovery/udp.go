@@ -1,9 +1,11 @@
 package discovery
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
+	"syscall"
 	"time"
 
 	"github.com/p2p-folder-sync/p2p-sync/internal/network/messages"
@@ -45,16 +47,44 @@ func NewUDPDiscoveryWithRegistry(port int, peerID string, capabilities map[strin
 
 // Start starts the UDP discovery service
 func (u *UDPDiscovery) Start() error {
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", u.port))
+	addr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf(":%d", u.port))
 	if err != nil {
 		return fmt.Errorf("failed to resolve UDP address: %w", err)
 	}
 
-	conn, err := net.ListenUDP("udp", addr)
+	// Use ListenConfig to set socket options for address reuse
+	// This allows multiple peers on the same machine to listen on the same port
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var opErr error
+			err := c.Control(func(fd uintptr) {
+				// Set SO_REUSEADDR to allow multiple bindings to the same port
+				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				if opErr != nil {
+					return
+				}
+				// Set SO_REUSEPORT to allow multiple processes to bind to the same port
+				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, 0xf /* SO_REUSEPORT */, 1)
+			})
+			if err != nil {
+				return err
+			}
+			return opErr
+		},
+	}
+
+	// Listen on the UDP address with the custom config
+	packetConn, err := lc.ListenPacket(context.Background(), "udp4", addr.String())
 	if err != nil {
 		return fmt.Errorf("failed to listen on UDP: %w", err)
 	}
-	u.conn = conn
+
+	var ok bool
+	u.conn, ok = packetConn.(*net.UDPConn)
+	if !ok {
+		packetConn.Close()
+		return fmt.Errorf("failed to convert PacketConn to UDPConn")
+	}
 
 	// Start listening for discovery messages
 	go u.listen()

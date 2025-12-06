@@ -28,12 +28,17 @@ func TestEndToEndIntegration(t *testing.T) {
 	peers := make([]*NetworkPeerSetup, 3)
 	peerNames := []string{"alpha", "beta", "gamma"}
 
+	// Use a common discovery port for UDP discovery
+	commonDiscoveryPort := 18081
+
 	for i, name := range peerNames {
 		peer, err := nth.SetupPeer(t, name, true) // Enable encryption
 		if err != nil {
 			t.Fatalf("Failed to setup peer %s: %v", name, err)
 		}
 		defer peer.Cleanup()
+		// Set common discovery port for all peers (with SO_REUSEPORT, they can all listen)
+		peer.Config.Network.DiscoveryPort = commonDiscoveryPort
 		peers[i] = peer
 	}
 
@@ -50,29 +55,27 @@ func TestEndToEndIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second) // 5 minutes for comprehensive test
 	defer cancel()
 
-	// Start all transports first
+	// Start all peers in sequence
 	for i, peer := range peers {
 		if err := peer.Transport.Start(); err != nil {
 			t.Fatalf("Failed to start peer %s transport: %v", peerNames[i], err)
 		}
-	}
-
-	// Manually connect all peers to each other
-	t.Log("Connecting peers to form mesh network...")
-	if err := nth.ConnectPeers(peers); err != nil {
-		t.Fatalf("Failed to connect peers: %v", err)
-	}
-	t.Log("SUCCESS: All peers connected in mesh topology")
-
-	// Now start the sync engines
-	for i, peer := range peers {
 		if err := peer.SyncEngine.Start(ctx); err != nil {
 			t.Fatalf("Failed to start peer %s sync engine: %v", peerNames[i], err)
 		}
+
+		// Stagger startup to avoid connection race conditions
+		if i < len(peers)-1 {
+			time.Sleep(1 * time.Second)
+		}
 	}
 
-	// Wait for connections to stabilize
-	time.Sleep(2 * time.Second)
+	// Wait for all peers to establish connections via UDP discovery
+	t.Log("Waiting for all peers to discover and connect via UDP...")
+	if err := WaitForPeerConnections(peers, 60*time.Second); err != nil {
+		t.Fatalf("Peers failed to form mesh network via UDP discovery: %v", err)
+	}
+	t.Log("SUCCESS: All peers connected in mesh topology via UDP discovery")
 
 	waiter := NewEventDrivenWaiterWithTimeout(60 * time.Second)
 	defer waiter.Close()
@@ -403,12 +406,17 @@ func TestComplexConflictResolution(t *testing.T) {
 	peers := make([]*NetworkPeerSetup, 3)
 	peerNames := []string{"alice", "bob", "charlie"}
 
+	// Use a common discovery port for UDP discovery
+	commonDiscoveryPort := 18082
+
 	for i, name := range peerNames {
 		peer, err := nth.SetupPeer(t, name, true)
 		if err != nil {
 			t.Fatalf("Failed to setup peer %s: %v", name, err)
 		}
 		defer peer.Cleanup()
+		// Set common discovery port for all peers (with SO_REUSEPORT, they can all listen)
+		peer.Config.Network.DiscoveryPort = commonDiscoveryPort
 		peers[i] = peer
 	}
 
@@ -420,29 +428,25 @@ func TestComplexConflictResolution(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	// Start all transports first
+	// Start all peers
 	for i, peer := range peers {
 		if err := peer.Transport.Start(); err != nil {
 			t.Fatalf("Failed to start peer %s transport: %v", peerNames[i], err)
 		}
-	}
-
-	// Manually connect all peers to each other
-	t.Log("Connecting peers to form mesh network...")
-	if err := nth.ConnectPeers(peers); err != nil {
-		t.Fatalf("Failed to connect peers: %v", err)
-	}
-	t.Log("SUCCESS: All peers connected in mesh topology")
-
-	// Now start the sync engines
-	for i, peer := range peers {
 		if err := peer.SyncEngine.Start(ctx); err != nil {
 			t.Fatalf("Failed to start peer %s sync engine: %v", peerNames[i], err)
 		}
+		if i < len(peers)-1 {
+			time.Sleep(1 * time.Second)
+		}
 	}
 
-	// Wait for connections to stabilize
-	time.Sleep(2 * time.Second)
+	// Wait for connections via UDP discovery
+	t.Log("Waiting for peers to discover and connect via UDP...")
+	if err := WaitForPeerConnections(peers, 30*time.Second); err != nil {
+		t.Fatalf("Peers failed to connect via UDP discovery: %v", err)
+	}
+	t.Log("SUCCESS: All peers connected via UDP discovery")
 
 	waiter := NewEventDrivenWaiterWithTimeout(45 * time.Second)
 	defer waiter.Close()
