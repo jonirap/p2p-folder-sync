@@ -405,11 +405,13 @@ func TestHandleMessage_Acknowledgment(t *testing.T) {
 		t.Fatalf("Failed to encrypt payload: %v", err)
 	}
 
+	correlationID := "msg-12345" // The original message ID that this ACK is for
 	ackMsg := &messages.Message{
-		ID:       "op-1",
-		Type:     messages.TypeOperationAck,
-		SenderID: peerID,
-		Payload:  encryptedPayload,
+		ID:            "op-1",
+		Type:          messages.TypeOperationAck,
+		SenderID:      peerID,
+		Payload:       encryptedPayload,
+		CorrelationID: &correlationID,
 	}
 
 	// Track the message for acknowledgment
