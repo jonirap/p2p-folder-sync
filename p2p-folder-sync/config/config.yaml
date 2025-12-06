@@ -1,0 +1,13 @@
+sync_folder: /app/sync
+database_path: /app/data/sync.db
+chunk_size: 524288
+max_concurrent_transfers: 10
+heartbeat_interval: 5s
+compression:
+  enabled: true
+  algorithm: zstd
+  level: 3
+  min_size: 1048576
+encryption:
+  enabled: true
+  algorithm: aes-256-gcm

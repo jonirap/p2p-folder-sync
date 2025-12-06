@@ -49,7 +49,22 @@ create_test_file() {
     local filename=$2
     local content_char=${3:-"X"}
 
-    docker exec p2p-folder-sync-peer-alpha-1 sh -c "dd if=/dev/zero bs=$size count=1 2>/dev/null | tr '\0' '$content_char' > /app/sync/$filename"
+    if ! is_container_running "p2p-folder-sync-peer-alpha-1"; then
+        echo "ERROR: peer-alpha-1 container is not running"
+        return 1
+    fi
+
+    docker exec p2p-folder-sync-peer-alpha-1 sh -c "dd if=/dev/zero bs=$size count=1 2>/dev/null | tr '\0' '$content_char' > /app/sync/$filename" 2>/dev/null
+}
+
+# Function to check if container is running
+is_container_running() {
+    local container_name=$1
+    if docker inspect "$container_name" --format='{{.State.Running}}' 2>/dev/null | grep -q "true"; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Function to check file sync
@@ -57,9 +72,20 @@ check_file_synced() {
     local filename=$1
     local expected_size=$2
 
-    actual_size=$(docker exec p2p-folder-sync-peer-beta-1 sh -c "stat -c %s /app/sync/$filename 2>/dev/null || echo 0")
+    # Check if container is running first
+    if ! is_container_running "p2p-folder-sync-peer-beta-1"; then
+        echo "ERROR: peer-beta-1 container is not running"
+        return 2
+    fi
 
-    if [ "$actual_size" -eq "$expected_size" ]; then
+    actual_size=$(docker exec p2p-folder-sync-peer-beta-1 sh -c "stat -c %s /app/sync/$filename 2>/dev/null || echo 0" 2>/dev/null)
+
+    # Handle empty response
+    if [ -z "$actual_size" ]; then
+        actual_size=0
+    fi
+
+    if [ "$actual_size" -eq "$expected_size" 2>/dev/null ]; then
         return 0
     else
         return 1
@@ -74,9 +100,20 @@ wait_for_file_sync() {
 
     local waited=0
     while [ $waited -lt $max_wait ]; do
-        if check_file_synced "$filename" "$expected_size"; then
+        check_file_synced "$filename" "$expected_size"
+        local result=$?
+
+        if [ $result -eq 0 ]; then
             return 0
+        elif [ $result -eq 2 ]; then
+            echo "FATAL: Container crashed, aborting benchmark"
+            # Show container logs for debugging
+            echo "=== Container Logs ==="
+            docker logs p2p-folder-sync-peer-beta-1 2>&1 | tail -20 || true
+            docker logs p2p-folder-sync-peer-alpha-1 2>&1 | tail -20 || true
+            return 2
         fi
+
         sleep 0.5
         waited=$((waited + 1))
     done
@@ -117,8 +154,14 @@ run_benchmark() {
     synced=0
     for i in $(seq 1 $num_files); do
         filename="${file_prefix}_$(printf "%04d" $i).dat"
-        if wait_for_file_sync "$filename" "$file_size" 120; then
+        wait_for_file_sync "$filename" "$file_size" 120
+        sync_result=$?
+
+        if [ $sync_result -eq 0 ]; then
             synced=$((synced + 1))
+        elif [ $sync_result -eq 2 ]; then
+            echo "ERROR: Container failure detected. Benchmark cannot continue."
+            exit 1
         fi
     done
 
@@ -169,6 +212,25 @@ echo "Starting Docker Compose..."
 docker compose -f "$PROJECT_ROOT/docker-compose.benchmark.yml" up -d --build
 
 wait_for_services
+
+# Verify containers are actually running
+echo ""
+echo "Verifying containers are running..."
+if ! is_container_running "p2p-folder-sync-peer-alpha-1"; then
+    echo "ERROR: peer-alpha-1 container failed to start or crashed"
+    echo "=== Container Logs ==="
+    docker logs p2p-folder-sync-peer-alpha-1 2>&1 || true
+    exit 1
+fi
+
+if ! is_container_running "p2p-folder-sync-peer-beta-1"; then
+    echo "ERROR: peer-beta-1 container failed to start or crashed"
+    echo "=== Container Logs ==="
+    docker logs p2p-folder-sync-peer-beta-1 2>&1 || true
+    exit 1
+fi
+
+echo "All containers verified and running!"
 
 # Initialize results file
 RESULTS_CSV="$REPORT_DIR/benchmark_${TIMESTAMP}.csv"
