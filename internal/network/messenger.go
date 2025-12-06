@@ -484,32 +484,52 @@ func (nm *NetworkMessenger) HandleMessage(msg *messages.Message) error {
 
 // handleAcknowledgment processes acknowledgment messages
 func (nm *NetworkMessenger) handleAcknowledgment(msg *messages.Message) error {
+	// CRITICAL FIX: Use CorrelationID to match the original message, not the ACK's own ID
+	if msg.CorrelationID == nil || *msg.CorrelationID == "" {
+		log.Printf("DEBUG [handleAcknowledgment]: ACK message has no CorrelationID, cannot match: %s", msg.ID)
+		return fmt.Errorf("acknowledgment message missing correlation ID")
+	}
+
+	originalMessageID := *msg.CorrelationID
+	log.Printf("DEBUG [handleAcknowledgment]: Received ACK for original message %s from %s", originalMessageID, msg.SenderID)
+
 	nm.pendingAcksMu.RLock()
-	ackCh, exists := nm.pendingAcks[msg.ID]
+	ackCh, exists := nm.pendingAcks[originalMessageID]
 	nm.pendingAcksMu.RUnlock()
 
 	if !exists {
-		// Acknowledgment for unknown message, ignore
+		log.Printf("DEBUG [handleAcknowledgment]: No pending ACK found for message %s, might have timed out", originalMessageID)
+		// Acknowledgment for unknown message, might have already timed out
 		return nil
 	}
+
+	log.Printf("DEBUG [handleAcknowledgment]: Found pending ACK for message %s", originalMessageID)
 
 	// Check if acknowledgment indicates success or failure
 	var ackErr error
 	if ackPayload, ok := msg.Payload.(*messages.OperationAckMessage); ok {
 		if !ackPayload.Success {
 			ackErr = fmt.Errorf("operation failed: %s", ackPayload.Error)
+			log.Printf("DEBUG [handleAcknowledgment]: ACK indicates failure: %s", ackPayload.Error)
+		} else {
+			log.Printf("DEBUG [handleAcknowledgment]: ACK indicates success")
 		}
 	} else if chunkAckPayload, ok := msg.Payload.(*messages.ChunkAckMessage); ok {
 		if !chunkAckPayload.Success {
 			ackErr = fmt.Errorf("chunk operation failed: %s", chunkAckPayload.Error)
+			log.Printf("DEBUG [handleAcknowledgment]: Chunk ACK indicates failure: %s", chunkAckPayload.Error)
+		} else {
+			log.Printf("DEBUG [handleAcknowledgment]: Chunk ACK indicates success")
 		}
 	}
 
 	// Send acknowledgment result to waiting sender
 	select {
 	case ackCh <- ackErr:
+		log.Printf("DEBUG [handleAcknowledgment]: Successfully sent ACK result to waiting channel")
 	default:
 		// Channel already closed or full, ignore
+		log.Printf("DEBUG [handleAcknowledgment]: Could not send to ACK channel (closed or full)")
 	}
 
 	return nil

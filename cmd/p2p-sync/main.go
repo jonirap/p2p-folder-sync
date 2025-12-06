@@ -158,6 +158,9 @@ func main() {
 	// Initialize network message handler BEFORE starting transport
 	messageHandler := network.NewNetworkMessageHandler(cfg, nil, nil, peerID) // syncEngine and heartbeatManager will be set later
 
+	messageHandler.SetTransport(networkTransport)
+	messageHandler.SetConnectionManager(connManager)
+
 	// Initialize heartbeat manager
 	heartbeatManager := connection.NewHeartbeatManager(connManager, networkTransport, cfg, peerID)
 	heartbeatManager.Start()

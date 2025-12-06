@@ -124,7 +124,7 @@ func TestNewHeartbeatManager(t *testing.T) {
 		},
 	}
 
-	hm := connection.NewHeartbeatManager(connManager, transport, cfg)
+	hm := connection.NewHeartbeatManager(connManager, transport, cfg, "peerID")
 
 	if hm == nil {
 		t.Error("Expected heartbeat manager to be created")

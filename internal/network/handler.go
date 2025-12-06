@@ -49,6 +49,16 @@ func NewNetworkMessageHandler(cfg *config.Config, syncEngine *syncpkg.Engine, he
 	}
 }
 
+// SetTransport sets the transport for sending acknowledgments
+func (h *NetworkMessageHandler) SetTransport(transport transport.Transport) {
+	h.transport = transport
+}
+
+// SetConnectionManager sets the connection manager
+func (h *NetworkMessageHandler) SetConnectionManager(connManager *connection.ConnectionManager) {
+	h.connManager = connManager
+}
+
 // SetSyncEngine sets the sync engine for the message handler
 func (h *NetworkMessageHandler) SetSyncEngine(syncEngine *syncpkg.Engine) {
 	h.syncEngine = syncEngine
@@ -382,13 +392,62 @@ func (h *NetworkMessageHandler) handleHeartbeat(msg *messages.Message) error {
 
 // sendAcknowledgment sends an acknowledgment for a received message
 func (h *NetworkMessageHandler) sendAcknowledgment(originalMsg *messages.Message, success bool, errorMsg string) error {
-	// This would send an acknowledgment back to the sender
-	// For now, just log the acknowledgment
 	if success {
 		fmt.Printf("Acknowledged message %s from %s\n", originalMsg.ID, originalMsg.SenderID)
 	} else {
 		fmt.Printf("Rejected message %s from %s: %s\n", originalMsg.ID, originalMsg.SenderID, errorMsg)
 	}
+
+	// Don't send ACK if we don't have transport or connection manager
+	if h.transport == nil || h.connManager == nil {
+		fmt.Printf("DEBUG [sendAcknowledgment]: Cannot send ACK - transport or connManager is nil\n")
+		return nil
+	}
+
+	// Get connection info for the sender
+	conn, err := h.connManager.GetConnection(originalMsg.SenderID)
+	if err != nil {
+		fmt.Printf("DEBUG [sendAcknowledgment]: Cannot get connection for %s: %v\n", originalMsg.SenderID, err)
+		return fmt.Errorf("no connection for sender %s: %w", originalMsg.SenderID, err)
+	}
+
+	// Create acknowledgment message
+	var ackMsg *messages.Message
+
+	// Determine ACK type based on original message type
+	if originalMsg.Type == messages.TypeChunk {
+		ackMsg = messages.NewMessage(
+			messages.TypeChunkAck,
+			h.peerID,
+			&messages.ChunkAckMessage{
+				Success: success,
+				Error:   errorMsg,
+			},
+		)
+	} else {
+		ackMsg = messages.NewMessage(
+			messages.TypeOperationAck,
+			h.peerID,
+			&messages.OperationAckMessage{
+				Success: success,
+				Error:   errorMsg,
+			},
+		)
+	}
+
+	// CRITICAL: Set CorrelationID to the original message ID so sender can match it
+	ackMsg.CorrelationID = &originalMsg.ID
+
+	fmt.Printf("DEBUG [sendAcknowledgment]: Sending ACK for message %s to %s (correlationID=%s)\n",
+		originalMsg.ID, originalMsg.SenderID, *ackMsg.CorrelationID)
+
+	// Send the acknowledgment
+	if err := h.transport.SendMessage(originalMsg.SenderID, conn.Address, conn.Port, ackMsg); err != nil {
+		fmt.Printf("DEBUG [sendAcknowledgment]: Failed to send ACK to %s: %v\n", originalMsg.SenderID, err)
+		return fmt.Errorf("failed to send acknowledgment: %w", err)
+	}
+
+	fmt.Printf("DEBUG [sendAcknowledgment]: Successfully sent ACK to %s\n", originalMsg.SenderID)
 	return nil
 }
 
