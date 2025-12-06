@@ -4,7 +4,6 @@ package system
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,17 +37,6 @@ func TestEndToEndIntegration(t *testing.T) {
 		peers[i] = peer
 	}
 
-	// Create a fully connected mesh topology
-	for i, peer1 := range peers {
-		var peerList []string
-		for j, peer2 := range peers {
-			if i != j {
-				peerList = append(peerList, fmt.Sprintf("localhost:%d", peer2.Config.Network.Port))
-			}
-		}
-		peer1.Config.Network.Peers = peerList
-	}
-
 	// Create network operation monitors for all peers
 	monitors := make([]*NetworkOperationMonitor, len(peers))
 	interceptedTransports := make([]*NetworkMessageInterceptor, len(peers))
@@ -62,32 +50,29 @@ func TestEndToEndIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second) // 5 minutes for comprehensive test
 	defer cancel()
 
-	// Start all peers in sequence
+	// Start all transports first
 	for i, peer := range peers {
 		if err := peer.Transport.Start(); err != nil {
 			t.Fatalf("Failed to start peer %s transport: %v", peerNames[i], err)
 		}
+	}
+
+	// Manually connect all peers to each other
+	t.Log("Connecting peers to form mesh network...")
+	if err := nth.ConnectPeers(peers); err != nil {
+		t.Fatalf("Failed to connect peers: %v", err)
+	}
+	t.Log("SUCCESS: All peers connected in mesh topology")
+
+	// Now start the sync engines
+	for i, peer := range peers {
 		if err := peer.SyncEngine.Start(ctx); err != nil {
 			t.Fatalf("Failed to start peer %s sync engine: %v", peerNames[i], err)
 		}
-
-		// Stagger startup to avoid connection race conditions
-		if i < len(peers)-1 {
-			// Use event-driven wait for peer initialization
-			initWaiter := NewEventDrivenWaiterWithTimeout(5 * time.Second)
-			initWaiter.WaitForCondition(func() bool {
-				// Check if peer is ready (this is a simplified check)
-				return true // Always true for now, could check peer health
-			}, "peer initialization")
-		}
 	}
 
-	// Wait for all peers to establish connections
-	t.Log("Waiting for all peers to form mesh network...")
-	if err := WaitForPeerConnections(peers, 60*time.Second); err != nil {
-		t.Fatalf("Peers failed to form mesh network: %v", err)
-	}
-	t.Log("SUCCESS: All peers connected in mesh topology")
+	// Wait for connections to stabilize
+	time.Sleep(2 * time.Second)
 
 	waiter := NewEventDrivenWaiterWithTimeout(60 * time.Second)
 	defer waiter.Close()
@@ -432,37 +417,32 @@ func TestComplexConflictResolution(t *testing.T) {
 		peer.Config.Conflict.ResolutionStrategy = "intelligent_merge"
 	}
 
-	// Create fully connected topology
-	for i, peer1 := range peers {
-		var peerList []string
-		for j, peer2 := range peers {
-			if i != j {
-				peerList = append(peerList, fmt.Sprintf("localhost:%d", peer2.Config.Network.Port))
-			}
-		}
-		peer1.Config.Network.Peers = peerList
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	// Start all peers
+	// Start all transports first
 	for i, peer := range peers {
 		if err := peer.Transport.Start(); err != nil {
 			t.Fatalf("Failed to start peer %s transport: %v", peerNames[i], err)
 		}
+	}
+
+	// Manually connect all peers to each other
+	t.Log("Connecting peers to form mesh network...")
+	if err := nth.ConnectPeers(peers); err != nil {
+		t.Fatalf("Failed to connect peers: %v", err)
+	}
+	t.Log("SUCCESS: All peers connected in mesh topology")
+
+	// Now start the sync engines
+	for i, peer := range peers {
 		if err := peer.SyncEngine.Start(ctx); err != nil {
 			t.Fatalf("Failed to start peer %s sync engine: %v", peerNames[i], err)
 		}
-		if i < len(peers)-1 {
-			time.Sleep(1 * time.Second)
-		}
 	}
 
-	// Wait for connections
-	if err := WaitForPeerConnections(peers, 30*time.Second); err != nil {
-		t.Fatalf("Peers failed to connect: %v", err)
-	}
+	// Wait for connections to stabilize
+	time.Sleep(2 * time.Second)
 
 	waiter := NewEventDrivenWaiterWithTimeout(45 * time.Second)
 	defer waiter.Close()

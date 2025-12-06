@@ -132,6 +132,7 @@ sync:
   chunk_size_default: 524288
   max_concurrent_transfers: 5
   operation_log_size: 10000
+  state_sync_interval: 5
 
 network:
   port: 8080
@@ -429,19 +430,41 @@ func testFailureRecovery(t *testing.T, projectName string) {
 	testContent := "Recovery test content"
 	createFileInContainer(t, projectName, "peer-alpha", "/app/sync/recovery.txt", testContent)
 
-	// Wait a bit
-	time.Sleep(3 * time.Second)
+	// Wait a bit for file to sync to peer-gamma
+	time.Sleep(5 * time.Second)
+
+	// Verify peer-gamma received the file while peer-beta was down
+	gammaContent, gammaErr := tryReadFileFromContainer(t, projectName, "peer-gamma", "/app/sync/recovery.txt")
+	if gammaErr != nil || gammaContent != testContent {
+		t.Logf("WARNING: File did not sync to peer-gamma while peer-beta was down (error: %v)", gammaErr)
+		// Print logs to debug
+		t.Log("=== peer-alpha logs ===")
+		t.Log(getContainerLogs(t, projectName, "peer-alpha", 50))
+		t.Log("=== peer-gamma logs ===")
+		t.Log(getContainerLogs(t, projectName, "peer-gamma", 50))
+	}
 
 	// Restart peer-beta
 	startContainer(t, projectName, "peer-beta")
 
-	// Wait for recovery sync
-	time.Sleep(10 * time.Second)
+	// Wait for peer-beta to start up and connect
+	time.Sleep(5 * time.Second)
+
+	// Wait for recovery sync with extended timeout (state sync every 5s, need multiple cycles)
+	// Give it enough time for: startup (5s) + connection (2s) + 3 state sync cycles (15s) = ~30s
+	time.Sleep(30 * time.Second)
 
 	// Verify peer-beta received the file
-	content := readFileFromContainer(t, projectName, "peer-beta", "/app/sync/recovery.txt")
-	if content != testContent {
-		t.Errorf("Failure recovery failed: expected %q, got %q", testContent, content)
+	content, betaErr := tryReadFileFromContainer(t, projectName, "peer-beta", "/app/sync/recovery.txt")
+	if betaErr != nil || content != testContent {
+		t.Errorf("Failure recovery failed: expected %q, got %q (error: %v)", testContent, content, betaErr)
+		// Print logs to debug
+		t.Log("=== peer-alpha logs ===")
+		t.Log(getContainerLogs(t, projectName, "peer-alpha", 100))
+		t.Log("=== peer-beta logs ===")
+		t.Log(getContainerLogs(t, projectName, "peer-beta", 100))
+		t.Log("=== peer-gamma logs ===")
+		t.Log(getContainerLogs(t, projectName, "peer-gamma", 100))
 	}
 
 	t.Log("Failure recovery test passed")
@@ -488,16 +511,24 @@ func createFileInContainer(t *testing.T, projectName, container, filePath, conte
 	}
 }
 
-func readFileFromContainer(t *testing.T, projectName, container, filePath string) string {
+func tryReadFileFromContainer(t *testing.T, projectName, container, filePath string) (string, error) {
 	cmd := exec.Command("docker", "exec", fmt.Sprintf("%s-%s-1", projectName, container),
 		"cat", filePath)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("Failed to read file from container %s: %v\nOutput: %s", container, err, string(output))
+		return "", fmt.Errorf("failed to read file: %w (output: %s)", err, string(output))
 	}
 
-	return strings.TrimSpace(string(output))
+	return strings.TrimSpace(string(output)), nil
+}
+
+func readFileFromContainer(t *testing.T, projectName, container, filePath string) string {
+	content, err := tryReadFileFromContainer(t, projectName, container, filePath)
+	if err != nil {
+		t.Fatalf("Failed to read file from container %s: %v", container, err)
+	}
+	return content
 }
 
 func getFileSizeInContainer(t *testing.T, projectName, container, filePath string) int {

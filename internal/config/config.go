@@ -24,6 +24,7 @@ type SyncConfig struct {
 	ChunkSizeDefault      int64  `yaml:"chunk_size_default"`
 	MaxConcurrentTransfers int    `yaml:"max_concurrent_transfers"`
 	OperationLogSize      int    `yaml:"operation_log_size"`
+	StateSyncInterval     int    `yaml:"state_sync_interval"` // seconds, 0 means use default (300s)
 }
 
 // NetworkConfig contains network settings

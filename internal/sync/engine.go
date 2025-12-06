@@ -1068,8 +1068,13 @@ func (e *Engine) periodicLogCompaction() {
 // periodicStateSync periodically synchronizes state with connected peers
 // This ensures peers stay in sync even after network partitions or missed operations
 func (e *Engine) periodicStateSync() {
-	// Sync state every 5 minutes
-	ticker := time.NewTicker(5 * time.Minute)
+	// Determine sync interval from config, default to 5 minutes if not set
+	intervalSeconds := e.config.Sync.StateSyncInterval
+	if intervalSeconds <= 0 {
+		intervalSeconds = 300 // Default: 5 minutes
+	}
+
+	ticker := time.NewTicker(time.Duration(intervalSeconds) * time.Second)
 	defer ticker.Stop()
 
 	for {
