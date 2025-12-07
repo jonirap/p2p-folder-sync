@@ -92,15 +92,15 @@ func runBenchmarkWithNetworkCondition(t *testing.T, condition NetworkCondition) 
 	configDir := filepath.Join(dockerDir, "config")
 
 	// Setup Docker environment
-	copyDockerFiles(t, dockerDir)
+	copyDockerFilesBenchmark(t, dockerDir)
 	createBenchmarkConfig(t, configDir)
-	createSyncDirectories(t, dockerDir)
+	createSyncDirectoriesBenchmark(t, dockerDir)
 
 	// Start Docker Compose
 	startDockerComposeBenchmark(t, dockerDir, projectName)
-	defer stopDockerCompose(t, dockerDir, projectName)
+	defer stopDockerComposeBenchmark(t, dockerDir, projectName)
 
-	waitForServices(t, projectName)
+	waitForServicesBenchmark(t, projectName)
 
 	// Apply network conditions
 	applyNetworkConditions(t, projectName, condition)
@@ -142,7 +142,7 @@ func benchmarkSmallFiles(t *testing.T, projectName string) BenchmarkMetrics {
 	for i := 0; i < numFiles; i++ {
 		content := strings.Repeat(fmt.Sprintf("Small file %d ", i), fileSize/20)
 		filename := fmt.Sprintf("/app/sync/small-%04d.dat", i)
-		createFileInContainer(t, projectName, "peer-alpha", filename, content)
+		createFileInContainerBenchmark(t, projectName, "peer-alpha", filename, content)
 	}
 
 	// Wait for sync
@@ -165,7 +165,7 @@ func benchmarkMediumFiles(t *testing.T, projectName string) BenchmarkMetrics {
 	for i := 0; i < numFiles; i++ {
 		content := strings.Repeat(fmt.Sprintf("M%d", i), fileSize/4)
 		filename := fmt.Sprintf("/app/sync/medium-%04d.dat", i)
-		createFileInContainer(t, projectName, "peer-alpha", filename, content)
+		createFileInContainerBenchmark(t, projectName, "peer-alpha", filename, content)
 	}
 
 	// Wait for sync
@@ -188,7 +188,7 @@ func benchmarkLargeFiles(t *testing.T, projectName string) BenchmarkMetrics {
 	for i := 0; i < numFiles; i++ {
 		content := strings.Repeat(fmt.Sprintf("L%d", i), fileSize/4)
 		filename := fmt.Sprintf("/app/sync/large-%04d.dat", i)
-		createFileInContainer(t, projectName, "peer-alpha", filename, content)
+		createFileInContainerBenchmark(t, projectName, "peer-alpha", filename, content)
 	}
 
 	// Wait for sync
@@ -422,7 +422,7 @@ func waitForSync(t *testing.T, projectName string, numFiles int, prefix string) 
 			syncedCount := 0
 			for i := 0; i < numFiles; i++ {
 				filename := fmt.Sprintf("/app/sync/%s%04d.dat", prefix, i)
-				size := getFileSizeInContainer(t, projectName, "peer-beta", filename)
+				size := getFileSizeInContainerBenchmark(t, projectName, "peer-beta", filename)
 				if size > 0 {
 					syncedCount++
 				}
@@ -441,7 +441,7 @@ func getContainerMetrics(t *testing.T, projectName, container string) time.Time 
 	return time.Now()
 }
 
-func getFileSizeInContainer(t *testing.T, projectName, container, filePath string) int {
+func getFileSizeInContainerBenchmark(t *testing.T, projectName, container, filePath string) int {
 	cmd := exec.Command("docker", "exec",
 		fmt.Sprintf("%s-%s-1", projectName, container),
 		"sh", "-c",
@@ -457,7 +457,7 @@ func getFileSizeInContainer(t *testing.T, projectName, container, filePath strin
 	return size
 }
 
-func createFileInContainer(t *testing.T, projectName, container, filePath, content string) {
+func createFileInContainerBenchmark(t *testing.T, projectName, container, filePath, content string) {
 	cmd := exec.Command("docker", "exec",
 		fmt.Sprintf("%s-%s-1", projectName, container),
 		"sh", "-c",
@@ -469,7 +469,7 @@ func createFileInContainer(t *testing.T, projectName, container, filePath, conte
 	}
 }
 
-func copyDockerFiles(t *testing.T, dockerDir string) {
+func copyDockerFilesBenchmark(t *testing.T, dockerDir string) {
 	// Copy essential files for Docker build
 	files := []string{"docker-compose.benchmark.yml", "Dockerfile", "go.mod", "go.sum"}
 
@@ -501,14 +501,14 @@ func copyDockerFiles(t *testing.T, dockerDir string) {
 		srcPath := filepath.Join(projectRoot, dir)
 		dstPath := filepath.Join(dockerDir, dir)
 
-		if err := copyDir(srcPath, dstPath); err != nil {
+		if err := copyDirBenchmark(srcPath, dstPath); err != nil {
 			t.Fatalf("Failed to copy directory %s: %v", dir, err)
 		}
 	}
 }
 
-// copyDir recursively copies a directory
-func copyDir(src, dst string) error {
+// copyDirBenchmark recursively copies a directory
+func copyDirBenchmark(src, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -564,7 +564,7 @@ encryption:
 	}
 }
 
-func createSyncDirectories(t *testing.T, dockerDir string) {
+func createSyncDirectoriesBenchmark(t *testing.T, dockerDir string) {
 	dirs := []string{"sync-data-alpha", "sync-data-beta"}
 
 	for _, dir := range dirs {
@@ -590,7 +590,7 @@ func startDockerComposeBenchmark(t *testing.T, dockerDir, projectName string) {
 	t.Logf("Docker Compose started: %s", projectName)
 }
 
-func stopDockerCompose(t *testing.T, dockerDir, projectName string) {
+func stopDockerComposeBenchmark(t *testing.T, dockerDir, projectName string) {
 	cmd := exec.Command("docker", "compose",
 		"-f", filepath.Join(dockerDir, "docker-compose.benchmark.yml"),
 		"-p", projectName,
@@ -604,7 +604,7 @@ func stopDockerCompose(t *testing.T, dockerDir, projectName string) {
 	}
 }
 
-func waitForServices(t *testing.T, projectName string) {
+func waitForServicesBenchmark(t *testing.T, projectName string) {
 	t.Log("Waiting for services to be ready...")
 	time.Sleep(15 * time.Second)
 

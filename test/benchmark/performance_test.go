@@ -1,8 +1,10 @@
-package integration
+//go:build benchmark
+// +build benchmark
+
+package benchmark
 
 import (
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -262,25 +264,6 @@ func testDiskIOPerformance(t *testing.T, projectName string) {
 	t.Logf("Disk read time: %v for %d bytes", readTime, totalSize)
 }
 
-// Helper functions
-
-func getMemoryUsage(t *testing.T, containerName string) string {
-	cmd := exec.Command("docker", "stats", "--no-stream", "--format", "{{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}", containerName)
-
-	output, err := cmd.Output()
-	if err != nil {
-		t.Logf("Failed to get memory usage: %v", err)
-		return "unknown"
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(lines) > 0 {
-		return lines[0]
-	}
-
-	return "unknown"
-}
-
 // TestScalability tests system scalability with increasing load
 func TestScalability(t *testing.T) {
 	if testing.Short() {
@@ -415,15 +398,4 @@ func TestReliability(t *testing.T) {
 	}
 
 	t.Log("Reliability test passed")
-}
-
-// Helper function to delete files in containers
-func deleteFileInContainer(t *testing.T, projectName, container, filePath string) {
-	cmd := exec.Command("docker", "exec", fmt.Sprintf("%s_%s_1", projectName, container),
-		"rm", "-f", filePath)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Logf("Failed to delete file in container %s: %v\nOutput: %s", container, err, output)
-	}
 }

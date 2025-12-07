@@ -653,8 +653,8 @@ func (e *Engine) handleCreate(path string) {
 		e.dbMu.Unlock()
 
 		if err != nil {
-			// Log error but continue
-			_ = err
+			log.Printf("ERROR [handleCreate]: Failed to insert file into database: %v", err)
+			return
 		}
 
 		// Create new file operation
@@ -716,8 +716,8 @@ func (e *Engine) handleUpdate(path string) {
 	e.dbMu.Unlock()
 
 	if err != nil {
-		// Log error but continue
-		_ = err
+		log.Printf("ERROR [handleUpdate]: Failed to insert file into database: %v", err)
+		return
 	}
 
 	op := NewSyncOperation(OpUpdate, relPath, fileID, e.peerID)

@@ -203,8 +203,8 @@ func TestFileSynchronizationLifecycle(t *testing.T) {
 	// The database stores relative paths, so we expect "test.txt"
 	expectedPath := "test.txt"
 
-	// Wait for file system events to be processed
-	time.Sleep(500 * time.Millisecond)
+	// Wait for file system events to be processed (watcher has 500ms debounce + processing time)
+	time.Sleep(750 * time.Millisecond)
 
 	// Verify file was indexed in database
 	files, err := db.GetAllFiles()
@@ -233,8 +233,8 @@ func TestFileSynchronizationLifecycle(t *testing.T) {
 		t.Fatalf("Failed to modify test file: %v", err)
 	}
 
-	// Wait for modification to be processed
-	time.Sleep(500 * time.Millisecond)
+	// Wait for modification to be processed (watcher has 500ms debounce + processing time)
+	time.Sleep(750 * time.Millisecond)
 
 	// Verify modification was detected
 	updatedFiles, err := db.GetAllFiles()
@@ -256,8 +256,8 @@ func TestFileSynchronizationLifecycle(t *testing.T) {
 		t.Fatalf("Failed to delete test file: %v", err)
 	}
 
-	// Wait for deletion to be processed
-	time.Sleep(500 * time.Millisecond)
+	// Wait for deletion to be processed (watcher has 500ms debounce + processing time)
+	time.Sleep(750 * time.Millisecond)
 
 	// Stop sync engine
 	if err := syncEngine.Stop(); err != nil {
@@ -354,8 +354,8 @@ func TestMultiplePeerSimulation(t *testing.T) {
 		t.Fatalf("Failed to create shared file in peer1: %v", err)
 	}
 
-	// Wait for peer1 to index the file
-	time.Sleep(500 * time.Millisecond)
+	// Wait for peer1 to index the file (watcher has 500ms debounce + processing time)
+	time.Sleep(750 * time.Millisecond)
 
 	// Verify peer1 has the file
 	peer1Files, err := db1.GetAllFiles()
@@ -384,8 +384,8 @@ func TestMultiplePeerSimulation(t *testing.T) {
 		t.Fatalf("Failed to handle incoming file on peer2: %v", err)
 	}
 
-	// Wait for peer2 to process the file
-	time.Sleep(500 * time.Millisecond)
+	// Wait for peer2 to process the file (watcher has 500ms debounce + processing time)
+	time.Sleep(750 * time.Millisecond)
 
 	// Verify peer2 received the file
 	peer2Files, err := db2.GetAllFiles()
