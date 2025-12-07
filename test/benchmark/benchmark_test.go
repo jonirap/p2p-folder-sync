@@ -1,3 +1,6 @@
+//go:build benchmark
+// +build benchmark
+
 package benchmark
 
 import (
@@ -467,8 +470,8 @@ func createFileInContainer(t *testing.T, projectName, container, filePath, conte
 }
 
 func copyDockerFiles(t *testing.T, dockerDir string) {
-	// Copy docker-compose.benchmark.yml and Dockerfile
-	files := []string{"docker-compose.benchmark.yml", "Dockerfile"}
+	// Copy essential files for Docker build
+	files := []string{"docker-compose.benchmark.yml", "Dockerfile", "go.mod", "go.sum"}
 
 	for _, file := range files {
 		src := filepath.Join("../..", file)
@@ -489,6 +492,47 @@ func copyDockerFiles(t *testing.T, dockerDir string) {
 			t.Fatalf("Failed to write %s: %v", dst, err)
 		}
 	}
+
+	// Copy source directories (cmd, internal, etc.) for the build
+	srcDirs := []string{"cmd", "internal"}
+	projectRoot := filepath.Join("../..")
+
+	for _, dir := range srcDirs {
+		srcPath := filepath.Join(projectRoot, dir)
+		dstPath := filepath.Join(dockerDir, dir)
+
+		if err := copyDir(srcPath, dstPath); err != nil {
+			t.Fatalf("Failed to copy directory %s: %v", dir, err)
+		}
+	}
+}
+
+// copyDir recursively copies a directory
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Calculate destination path
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		dstPath := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			return os.MkdirAll(dstPath, info.Mode())
+		}
+
+		// Copy file
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		return os.WriteFile(dstPath, data, info.Mode())
+	})
 }
 
 func createBenchmarkConfig(t *testing.T, configDir string) {
