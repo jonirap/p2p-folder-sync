@@ -14,7 +14,6 @@ services:
       - P2P_SYNC_FOLDER=/app/sync
       - P2P_CONFIG_PATH=/app/config/config.yaml
       - PEER_ID=alpha
-      - PEERS=peer-beta:8080,peer-gamma:8080
     networks:
       - p2p-network
     restart: unless-stopped
@@ -34,7 +33,6 @@ services:
       - P2P_SYNC_FOLDER=/app/sync
       - P2P_CONFIG_PATH=/app/config/config.yaml
       - PEER_ID=beta
-      - PEERS=peer-alpha:8080,peer-gamma:8080
     networks:
       - p2p-network
     restart: unless-stopped
@@ -54,7 +52,6 @@ services:
       - P2P_SYNC_FOLDER=/app/sync
       - P2P_CONFIG_PATH=/app/config/config.yaml
       - PEER_ID=gamma
-      - PEERS=peer-alpha:8080,peer-beta:8080
     networks:
       - p2p-network
     restart: unless-stopped

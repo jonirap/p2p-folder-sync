@@ -38,10 +38,9 @@ sync-data*/
 keychain.db
 .p2p-sync-tmp-*
 /p2p-sync
+/p2p-sync-folder/p2p-sync
+p2p-sync
 
 # Logs
 *.log
-
-# Config (local)
-config/config.yaml
 

@@ -356,10 +356,14 @@ func (t *TCPTransport) getOrCreateConnection(peerID, address string, port int) (
 
 		if !alreadySent {
 			fmt.Printf("DEBUG [TCP]: Sending handshake to %s with local peer ID %s\n", peerID, t.localPeerID)
-			t.sendHandshake(conn, t.localPeerID)
+			if err := t.sendHandshake(conn, t.localPeerID); err != nil {
+				return nil, fmt.Errorf("failed to send handshake: %w", err)
+			}
 
-			// Start a goroutine to read the handshake response
-			go t.readHandshakeResponse(conn, peerID)
+			// Wait for handshake response synchronously to ensure session key is established
+			if err := t.readHandshakeResponse(conn, peerID); err != nil {
+				return nil, fmt.Errorf("failed to complete handshake: %w", err)
+			}
 		}
 	}
 
@@ -367,17 +371,17 @@ func (t *TCPTransport) getOrCreateConnection(peerID, address string, port int) (
 }
 
 // readHandshakeResponse reads a single handshake response from an outbound connection
-func (t *TCPTransport) readHandshakeResponse(conn net.Conn, placeholderPeerID string) {
+func (t *TCPTransport) readHandshakeResponse(conn net.Conn, placeholderPeerID string) error {
 	decoder := json.NewDecoder(conn)
 	var msg messages.Message
 
 	// Set a timeout for receiving the handshake
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	defer conn.SetReadDeadline(time.Time{}) // Clear deadline after reading
 
 	if err := decoder.Decode(&msg); err != nil {
 		fmt.Printf("DEBUG [TCP]: Failed to read handshake response from %s: %v\n", placeholderPeerID, err)
-		return
+		return fmt.Errorf("failed to decode handshake response: %w", err)
 	}
 
 	if msg.Type == "handshake" && msg.SenderID != "" {
@@ -391,11 +395,15 @@ func (t *TCPTransport) readHandshakeResponse(conn net.Conn, placeholderPeerID st
 			sessionKey := t.deriveSessionKey(t.localPeerID, msg.SenderID)
 			if err := t.connManager.SetSessionKey(msg.SenderID, sessionKey); err != nil {
 				fmt.Fprintf(os.Stderr, "Failed to set session key for peer %s: %v\n", msg.SenderID, err)
+				return fmt.Errorf("failed to set session key: %w", err)
 			} else {
 				fmt.Printf("DEBUG [TCP]: Set session key for peer %s on outbound connection\n", msg.SenderID)
 			}
 		}
+		return nil
 	}
+
+	return fmt.Errorf("invalid handshake response from %s", placeholderPeerID)
 }
 
 // sendHandshake sends a handshake message with the local peer ID

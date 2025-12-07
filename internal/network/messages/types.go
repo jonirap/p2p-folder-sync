@@ -20,16 +20,18 @@ const (
 // DiscoveryMessage represents a peer discovery message
 type DiscoveryMessage struct {
 	PeerID      string                 `json:"peer_id"`
-	Port        int                    `json:"port"`
+	Port        int                    `json:"port"`         // UDP discovery port
+	SyncPort    int                    `json:"sync_port"`    // TCP sync port
 	Capabilities map[string]interface{} `json:"capabilities"`
 	Version     string                 `json:"version"`
 }
 
 // DiscoveryResponseMessage represents a discovery response
 type DiscoveryResponseMessage struct {
-	PeerID  string `json:"peer_id"`
-	Port    int    `json:"port"`
-	Version string `json:"version"`
+	PeerID   string `json:"peer_id"`
+	Port     int    `json:"port"`      // UDP discovery port
+	SyncPort int    `json:"sync_port"` // TCP sync port
+	Version  string `json:"version"`
 }
 
 // HandshakeMessage represents a handshake message

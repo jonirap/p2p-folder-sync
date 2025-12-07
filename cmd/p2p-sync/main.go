@@ -118,7 +118,6 @@ func main() {
 
 	// Initialize peer registry
 	peerRegistry := discovery.NewRegistry()
-	_ = peerRegistry // TODO: Use in discovery integration
 
 	// Start UDP discovery service
 	capabilities := map[string]interface{}{
@@ -126,12 +125,12 @@ func main() {
 		"compression": cfg.Compression.Enabled,
 		"chunking":    true,
 	}
-	udpDiscovery := discovery.NewUDPDiscovery(cfg.Network.DiscoveryPort, peerID, capabilities, AppVersion)
+	udpDiscovery := discovery.NewUDPDiscoveryWithRegistry(cfg.Network.DiscoveryPort, cfg.Network.Port, peerID, capabilities, AppVersion, peerRegistry)
 	if err := udpDiscovery.Start(); err != nil {
 		logger.Fatal("Failed to start UDP discovery", zap.Error(err))
 	}
 	defer udpDiscovery.Stop()
-	logger.Info("UDP discovery started", zap.Int("port", cfg.Network.DiscoveryPort))
+	logger.Info("UDP discovery started", zap.Int("discovery_port", cfg.Network.DiscoveryPort), zap.Int("sync_port", cfg.Network.Port))
 
 	// Initialize network transport
 	protocol := cfg.Network.Protocol
@@ -218,6 +217,85 @@ func main() {
 			zap.String("protocol", protocol), zap.Int("port", cfg.Network.Port))
 	}
 	defer networkTransport.Stop()
+
+	// Register callback to automatically connect to discovered peers
+	peerRegistry.AddDiscoveryCallback(func(discoveredPeerID string, address string, port int, capabilities map[string]interface{}, version string) {
+		// Skip if it's our own peer ID
+		if discoveredPeerID == peerID {
+			return
+		}
+
+		// Check if already connected AND has session key
+		if _, err := connManager.GetConnection(discoveredPeerID); err == nil {
+			// Also verify session key exists - if not, we need to reconnect
+			if _, keyErr := connManager.GetSessionKey(discoveredPeerID); keyErr == nil {
+				logger.Info("Already connected to discovered peer", zap.String("peer_id", discoveredPeerID))
+				return
+			}
+			logger.Info("Connection exists but no session key, reconnecting", zap.String("peer_id", discoveredPeerID))
+		}
+
+		logger.Info("Connecting to discovered peer",
+			zap.String("peer_id", discoveredPeerID),
+			zap.String("address", address),
+			zap.Int("port", port))
+
+		// Connect to the peer
+		go func() {
+			if err := networkTransport.ConnectToPeer(discoveredPeerID, address, port); err != nil {
+				logger.Warn("Failed to connect to discovered peer",
+					zap.String("peer_id", discoveredPeerID),
+					zap.String("address", address),
+					zap.Int("port", port),
+					zap.Error(err))
+			} else {
+				logger.Info("Successfully connected to discovered peer",
+					zap.String("peer_id", discoveredPeerID),
+					zap.String("address", address),
+					zap.Int("port", port))
+			}
+		}()
+	})
+
+	// Connect to peers that were already discovered before the callback was registered
+	logger.Info("Connecting to already-discovered peers")
+	for _, peer := range peerRegistry.GetAllPeers() {
+		// Skip our own peer ID
+		if peer.PeerID == peerID {
+			continue
+		}
+
+		// Check if already connected AND has session key
+		if _, err := connManager.GetConnection(peer.PeerID); err == nil {
+			// Also verify session key exists - if not, we need to reconnect
+			if _, keyErr := connManager.GetSessionKey(peer.PeerID); keyErr == nil {
+				logger.Info("Already connected to peer", zap.String("peer_id", peer.PeerID))
+				continue
+			}
+			logger.Info("Connection exists but no session key, reconnecting", zap.String("peer_id", peer.PeerID))
+		}
+
+		logger.Info("Connecting to already-discovered peer",
+			zap.String("peer_id", peer.PeerID),
+			zap.String("address", peer.Address),
+			zap.Int("port", peer.Port))
+
+		// Connect to the peer
+		go func(p *discovery.PeerInfo) {
+			if err := networkTransport.ConnectToPeer(p.PeerID, p.Address, p.Port); err != nil {
+				logger.Warn("Failed to connect to already-discovered peer",
+					zap.String("peer_id", p.PeerID),
+					zap.String("address", p.Address),
+					zap.Int("port", p.Port),
+					zap.Error(err))
+			} else {
+				logger.Info("Successfully connected to already-discovered peer",
+					zap.String("peer_id", p.PeerID),
+					zap.String("address", p.Address),
+					zap.Int("port", p.Port))
+			}
+		}(peer)
+	}
 
 	// Initialize sync engine with messenger
 	syncEngine, err := sync.NewEngineWithMessenger(cfg, db, peerID, networkMessenger)

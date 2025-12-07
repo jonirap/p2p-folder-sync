@@ -21,6 +21,8 @@ type Transport interface {
 	SendMessage(peerID string, address string, port int, msg *messages.Message) error
 	// ConnectToPeer establishes an outbound connection to a peer
 	ConnectToPeer(peerID string, address string, port int) error
+	// SetPeerID sets the PeerID
+	SetPeerID(peerID string)
 }
 
 // TransportFactory creates transports based on configuration

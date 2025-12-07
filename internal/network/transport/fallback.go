@@ -10,15 +10,15 @@ import (
 
 // FallbackTransport implements automatic QUIC-to-TCP fallback
 type FallbackTransport struct {
-	primaryTransport   Transport // QUIC
-	fallbackTransport  Transport // TCP
-	currentTransport   Transport
-	handler            MessageHandler
-	port               int
-	mu                 sync.RWMutex
-	usedFallback       bool
-	peerProtocols      map[string]string // peerID -> protocol (quic/tcp)
-	peerProtocolsMu    sync.RWMutex
+	primaryTransport  Transport // QUIC
+	fallbackTransport Transport // TCP
+	currentTransport  Transport
+	handler           MessageHandler
+	port              int
+	mu                sync.RWMutex
+	usedFallback      bool
+	peerProtocols     map[string]string // peerID -> protocol (quic/tcp)
+	peerProtocolsMu   sync.RWMutex
 }
 
 // NewFallbackTransport creates a new fallback transport that tries QUIC first, then TCP
@@ -211,4 +211,8 @@ func (ft *FallbackTransport) GetPeerProtocol(peerID string) string {
 		return ft.GetActiveProtocol()
 	}
 	return protocol
+}
+
+func (ft *FallbackTransport) SetPeerID(peerID string) {
+	ft.currentTransport.SetPeerID(peerID)
 }

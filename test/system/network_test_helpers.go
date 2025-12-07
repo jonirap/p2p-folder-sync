@@ -116,7 +116,7 @@ func (nth *NetworkTestHelper) SetupPeer(t *testing.T, peerName string, enableEnc
 		"compression": cfg.Compression.Enabled,
 		"chunking":    true,
 	}
-	udpDiscovery := discovery.NewUDPDiscoveryWithRegistry(cfg.Network.DiscoveryPort, peerID, capabilities, "1.0", peerRegistry)
+	udpDiscovery := discovery.NewUDPDiscoveryWithRegistry(cfg.Network.DiscoveryPort, cfg.Network.Port, peerID, capabilities, "1.0", peerRegistry)
 	if err := udpDiscovery.Start(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to start UDP discovery: %w", err)

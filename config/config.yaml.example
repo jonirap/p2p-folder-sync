@@ -11,7 +11,7 @@ network:
   discovery_port: 8081
   protocol: "quic"           # Options: quic, tcp (quic is primary with tcp fallback)
   heartbeat_interval: 30     # seconds
-  connection_timeout: 60      # seconds
+  connection_timeout: 60     # seconds
   peers:                     # Manual peer list (optional)
     # - "192.168.1.10:8080"
     # - "192.168.1.11:8080"

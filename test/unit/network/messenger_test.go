@@ -58,7 +58,32 @@ func (mt *MockTransport) SetMessageHandler(handler transport.MessageHandler) err
 }
 
 func (mt *MockTransport) ConnectToPeer(peerID, address string, port int) error {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+
+	// Set up the connection in the connection manager (similar to real transports)
+	if mt.connManager != nil {
+		// Add the connection
+		mt.connManager.AddConnection(peerID, address, port)
+
+		// Set up a session key (mock key for testing)
+		sessionKey := make([]byte, 32)
+		for i := range sessionKey {
+			sessionKey[i] = byte(i)
+		}
+		if err := mt.connManager.SetSessionKey(peerID, sessionKey); err != nil {
+			return err
+		}
+
+		// Update connection state
+		mt.connManager.UpdateConnectionState(peerID, connection.StateConnected)
+	}
+
 	return nil
+}
+
+func (mt *MockTransport) SetPeerID(peerID string) {
+	// Mock implementation - no-op for testing
 }
 
 func (mt *MockTransport) Start() error {

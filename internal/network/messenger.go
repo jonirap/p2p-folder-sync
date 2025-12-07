@@ -2,7 +2,6 @@ package network
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"log"
@@ -78,6 +77,8 @@ func NewNetworkMessenger(cfg *config.Config, connManager *connection.ConnectionM
 	}); ok {
 		tcpTransport.SetConnectionManager(connManager)
 	}
+
+	transport.SetPeerID(peerID)
 
 	return messenger, nil
 }
@@ -574,27 +575,16 @@ func (nm *NetworkMessenger) RequestStateSync(peerID string) error {
 // ConnectToPeer establishes a connection to a peer and performs session key exchange
 func (nm *NetworkMessenger) ConnectToPeer(peerID, address string, port int) error {
 	// Establish transport connection
+	// The transport layer (TCP/QUIC) handles the session key exchange during handshake
 	if err := nm.transport.ConnectToPeer(peerID, address, port); err != nil {
 		return fmt.Errorf("failed to connect transport to peer %s: %w", peerID, err)
 	}
 
-	// Add connection to connection manager
-	nm.connManager.AddConnection(peerID, address, port)
-
-	// TODO: Perform session key exchange
-	// For now, we'll generate a simple session key
-	// In production, this would involve ECDH key exchange
-	sessionKey := make([]byte, 32)
-	if _, err := rand.Read(sessionKey); err != nil {
-		return fmt.Errorf("failed to generate session key: %w", err)
+	// Connection and session key are already set up by the transport layer
+	// Verify that the session key was established
+	if _, err := nm.connManager.GetSessionKey(peerID); err != nil {
+		return fmt.Errorf("session key not established for peer %s: %w", peerID, err)
 	}
-
-	// Set the session key
-	if err := nm.connManager.SetSessionKey(peerID, sessionKey); err != nil {
-		return fmt.Errorf("failed to set session key for peer %s: %w", peerID, err)
-	}
-
-	nm.connManager.UpdateConnectionState(peerID, connection.StateConnected)
 
 	return nil
 }

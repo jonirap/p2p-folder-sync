@@ -58,6 +58,10 @@ func (mt *MockTransport) ConnectToPeer(peerID, address string, port int) error {
 	return nil
 }
 
+func (mt *MockTransport) SetPeerID(peerID string) {
+	// Mock implementation - no-op for testing
+}
+
 func (mt *MockTransport) GetSentMessages() []*messages.Message {
 	return mt.sentMessages
 }
