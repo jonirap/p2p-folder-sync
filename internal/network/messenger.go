@@ -456,6 +456,11 @@ func (nm *NetworkMessenger) HandleMessage(msg *messages.Message) error {
 
 	if ok {
 		log.Printf("DEBUG [NetworkMessenger]: Found encrypted payload, decrypting")
+		// Check if session key is set before attempting decryption
+		if len(conn.SessionKey) == 0 {
+			log.Printf("DEBUG [NetworkMessenger]: Session key not yet established for peer %s, cannot decrypt", msg.SenderID)
+			return fmt.Errorf("session key not yet established for peer %s", msg.SenderID)
+		}
 		// Decrypt the payload
 		decryptedData, err := crypto.Decrypt(encryptedMsg, conn.SessionKey)
 		if err != nil {

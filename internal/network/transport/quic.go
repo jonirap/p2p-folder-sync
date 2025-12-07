@@ -202,22 +202,22 @@ func (q *QUICTransport) handleStream(conn *quic.Conn, stream *quic.Stream) {
 			// Handle message via message handler
 			if q.handler != nil {
 				if err := q.handler.HandleMessage(&msg); err != nil {
-					// Send error acknowledgment
+					// Send error acknowledgment with CorrelationID
 					ack := messages.NewMessage(messages.TypeOperationAck, "", messages.OperationAckMessage{
 						OperationID: msg.ID,
 						Success:     false,
 						Error:       err.Error(),
-					})
+					}).WithCorrelationID(msg.ID)
 					encoder.Encode(ack)
 					continue
 				}
 			}
 
-			// Send success acknowledgment
+			// Send success acknowledgment with CorrelationID
 			ack := messages.NewMessage(messages.TypeOperationAck, "", messages.OperationAckMessage{
 				OperationID: msg.ID,
 				Success:     true,
-			})
+			}).WithCorrelationID(msg.ID)
 
 			if err := encoder.Encode(ack); err != nil {
 				return

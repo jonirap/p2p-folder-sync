@@ -261,7 +261,7 @@ func (t *TCPTransport) handleConnection(conn *net.TCPConn) {
 						OperationID: msg.ID,
 						Success:     false,
 						Error:       err.Error(),
-					})
+					}).WithCorrelationID(msg.ID)
 					encoder.Encode(ack)
 					continue
 				}
@@ -274,7 +274,7 @@ func (t *TCPTransport) handleConnection(conn *net.TCPConn) {
 			ack := messages.NewMessage(messages.TypeOperationAck, "", messages.OperationAckMessage{
 				OperationID: msg.ID,
 				Success:     true,
-			})
+			}).WithCorrelationID(msg.ID)
 			encoder.Encode(ack)
 		}
 	}
@@ -345,6 +345,11 @@ func (t *TCPTransport) getOrCreateConnection(peerID, address string, port int) (
 	if t.connManager != nil {
 		t.connManager.AddConnection(peerID, address, port)
 		t.connManager.UpdateConnectionState(peerID, connection.StateConnected)
+	}
+
+	// Start a goroutine to handle incoming messages on this outbound connection
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		go t.handleConnection(tcpConn)
 	}
 
 	// Send handshake to exchange peer IDs
